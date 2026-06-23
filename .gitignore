@@ -1,0 +1,86 @@
+﻿# Python caches and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.venv/
+venv/
+env/
+ENV/
+.conda/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Runtime logs
+*.log
+*.out
+*.err
+
+# Local Codex / scratch artifacts
+.codex_tmp/
+
+# Local/private data and source documents.
+# Add selected files with `git add -f <file>` only after review.
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.doc
+*.docx
+*.pdf
+*.ppt
+*.pptx
+
+# Generated experiment outputs
+outputs/
+results_v74/
+results_v74_locked_test/
+paper_v74/
+paper_v74_locked_test/
+all/
+tmp_ce_compare_*/
+catboost_info/
+
+# Local backups and generated package snapshots
+backups/
+*.bak
+*.bak_*
+
+# Model checkpoints and serialized artifacts
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.pkl
+*.joblib
+
+# TensorBoard / profiler artifacts
+events.out.tfevents*
+runs/
+lightning_logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Large archives
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
