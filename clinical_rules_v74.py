@@ -8,6 +8,9 @@ import pandas as pd
 
 
 TASK2_ABG_FREQS = [500, 1000, 2000, 4000]
+TASK2_RULE_CORE_AC_FREQS = [500, 1000, 2000, 4000]
+TASK2_RULE_HIGH_AC_EITHER_FREQS = [6000, 8000]
+TASK2_RULE_AC_FREQS = [*TASK2_RULE_CORE_AC_FREQS, *TASK2_RULE_HIGH_AC_EITHER_FREQS]
 TASK2_EAR_LEVEL_AC_FREQS = [250, 500, 750, 1000, 1500, 2000, 3000, 4000, 6000, 8000]
 TASK2_STANDARD_HEARING_TYPES = {"WNL", "SNHL", "CHL", "MHL"}
 
@@ -32,8 +35,12 @@ TASK2_BC_NR_LIMITS_DB = {
 }
 
 TASK2_RULE_ABG_THRESHOLD_DB = 10.0
+TASK2_ABG_BORDERLINE_LOW_DB = 8.0
+TASK2_ABG_BORDERLINE_HIGH_DB = 10.0
 TASK2_RULE_AC_THRESHOLD_DB = 25.0
 TASK2_RULE_BC_THRESHOLD_DB = 25.0
+TASK3_C_PEAK_LOWER_DAPA = -300.0
+TASK3_C_PEAK_UPPER_DAPA = -150.0
 
 TASK3_NAME_MAP = {
     "Vea": "tymp_Vea",
@@ -133,8 +140,9 @@ def is_nr_value(value) -> bool:
             return False
     except TypeError:
         pass
-    return "NR" in str(value).strip().upper()
-
+    upper = str(value).strip().upper().replace(" ", "")
+    upper = upper.replace("DB", "")
+    return re.fullmatch(r"-?\d+(?:\.\d+)?NR", upper) is not None
 
 def numeric_series(df: pd.DataFrame, col: str, nr_limits: Optional[Dict[int, float]] = None) -> pd.Series:
     if col not in df.columns:
@@ -191,8 +199,16 @@ def infer_task2_hearing_type_from_rule(row: Mapping) -> Tuple[str, bool]:
     any_abg = False
     any_bc_high = False
     any_ac_high = False
-    has_ac_nr_bc_nr = False
     has_uncertain_evidence = False
+
+    for hz in TASK2_RULE_AC_FREQS:
+        ac_col = f"ac_{hz}Hz"
+        ac = row_numeric_value(row, ac_col, TASK2_AC_NR_LIMITS_DB)
+        ac_nr = flag_value(row, f"{ac_col}_nr")
+        ac_missing = ac is None and not ac_nr
+        has_uncertain_evidence = has_uncertain_evidence or ac_missing
+        if ac is not None and ac > TASK2_RULE_AC_THRESHOLD_DB:
+            any_ac_high = True
 
     for hz in TASK2_ABG_FREQS:
         ac_col = f"ac_{hz}Hz"
@@ -203,44 +219,32 @@ def infer_task2_hearing_type_from_rule(row: Mapping) -> Tuple[str, bool]:
         bc = row_numeric_value(row, bc_col, TASK2_BC_NR_LIMITS_DB)
         ac_nr = flag_value(row, f"{ac_col}_nr")
         bc_nr = flag_value(row, f"{bc_col}_nr")
-        bc_missing = flag_value(row, f"{bc_col}_missing") or (bc is None and not bc_nr)
         ac_missing = ac is None and not ac_nr
+        bc_missing = flag_value(row, f"{bc_col}_missing") or (bc is None and not bc_nr)
         abg_missing = (
             flag_value(row, f"{abg_col}_missing", default=1.0 if ac_missing or bc_missing else 0.0)
             or ac_missing
             or bc_missing
         )
-        abg_censored = flag_value(row, f"{abg_col}_censored") or ac_nr or bc_nr
 
-        has_uncertain_evidence = has_uncertain_evidence or ac_missing or bc_missing or abg_missing or abg_censored
+        has_uncertain_evidence = has_uncertain_evidence or ac_missing or bc_missing or abg_missing
 
-        if ac is not None and ac > TASK2_RULE_AC_THRESHOLD_DB:
-            any_ac_high = True
         if (not bc_missing) and bc is not None and bc > TASK2_RULE_BC_THRESHOLD_DB:
             any_bc_high = True
 
-        gap = False
         if (not abg_missing) and ac is not None and bc is not None:
-            if ac_nr and bc_nr:
-                has_ac_nr_bc_nr = True
-            elif (not ac_nr) and bc_nr:
-                gap = False
-            else:
-                gap = (ac - bc) > TASK2_RULE_ABG_THRESHOLD_DB
-        elif ac_nr and bc_nr:
-            has_ac_nr_bc_nr = True
-
-        any_abg = any_abg or gap
+            any_abg = any_abg or (abs(ac - bc) > TASK2_RULE_ABG_THRESHOLD_DB)
 
     if any_abg:
         return ("MHL" if any_bc_high else "CHL"), has_uncertain_evidence
-    if any_ac_high or has_ac_nr_bc_nr:
+    if any_ac_high:
         return "SNHL", has_uncertain_evidence
     return "WNL", has_uncertain_evidence
 
-
 def task2_evidence_decision(row: Mapping) -> dict:
     has_ac_missing = False
+    has_core_ac_missing = False
+    has_high_ac_pair_missing = False
     has_bc_missing = False
     has_any_nr = False
     has_ac_nr = False
@@ -248,8 +252,26 @@ def task2_evidence_decision(row: Mapping) -> dict:
     has_abg_censored = False
     has_abg_missing = False
     has_abg_borderline = False
+    has_clear_abg = False
     bc_present_count = 0
     ac_present_count = 0
+    high_ac_present_count = 0
+
+    for hz in TASK2_RULE_AC_FREQS:
+        ac_col = f"ac_{hz}Hz"
+        ac_value = parse_numeric_value(row.get(ac_col), hz=hz, nr_limits=TASK2_AC_NR_LIMITS_DB)
+        ac_nr = flag_value(row, f"{ac_col}_nr")
+        ac_missing = ac_value is None and not ac_nr
+        has_ac_missing = has_ac_missing or ac_missing
+        if hz in TASK2_RULE_CORE_AC_FREQS:
+            has_core_ac_missing = has_core_ac_missing or ac_missing
+        if hz in TASK2_RULE_HIGH_AC_EITHER_FREQS and not ac_missing and ac_value is not None:
+            high_ac_present_count += 1
+        has_ac_nr = has_ac_nr or ac_nr
+        has_any_nr = has_any_nr or ac_nr
+        ac_present_count += int(ac_value is not None)
+
+    has_high_ac_pair_missing = high_ac_present_count == 0
 
     for hz in TASK2_ABG_FREQS:
         ac_col = f"ac_{hz}Hz"
@@ -268,31 +290,40 @@ def task2_evidence_decision(row: Mapping) -> dict:
         abg_missing = abg_missing_flag or ac_missing or bc_missing
         abg_censored = abg_censored_flag or ac_nr or bc_nr
 
-        has_ac_missing = has_ac_missing or ac_missing
         has_bc_missing = has_bc_missing or bc_missing
-        has_ac_nr = has_ac_nr or ac_nr
         has_bc_nr = has_bc_nr or bc_nr
         has_any_nr = has_any_nr or ac_nr or bc_nr
         has_abg_missing = has_abg_missing or abg_missing
         has_abg_censored = has_abg_censored or abg_censored
-        ac_present_count += int(ac_value is not None)
         bc_present_count += int(bc_value is not None)
         if not abg_missing and ac_value is not None and bc_value is not None:
-            abg = ac_value - bc_value
-            has_abg_borderline = has_abg_borderline or (8.0 <= abg <= 12.0)
+            abg = abs(ac_value - bc_value)
+            has_clear_abg = has_clear_abg or (abg > TASK2_RULE_ABG_THRESHOLD_DB)
+            has_abg_borderline = has_abg_borderline or (
+                TASK2_ABG_BORDERLINE_LOW_DB <= abg <= TASK2_ABG_BORDERLINE_HIGH_DB
+            )
 
     no_bc_data = bc_present_count == 0
+    borderline_only = has_abg_borderline and not has_clear_abg
+    complete_for_rule = bool(
+        not has_core_ac_missing
+        and not has_high_ac_pair_missing
+        and not has_bc_missing
+        and not has_abg_missing
+        and not no_bc_data
+    )
+
     if no_bc_data:
         status = "no_bc_data"
-    elif has_any_nr or has_abg_censored:
-        status = "nr_or_censored"
     elif has_bc_missing:
         status = "bc_missing"
-    elif has_ac_missing:
+    elif has_core_ac_missing:
         status = "ac_missing"
+    elif has_high_ac_pair_missing:
+        status = "high_ac_missing"
     elif has_abg_missing:
         status = "abg_missing"
-    elif has_abg_borderline:
+    elif borderline_only:
         status = "abg_borderline"
     else:
         status = "complete_evidence"
@@ -300,8 +331,10 @@ def task2_evidence_decision(row: Mapping) -> dict:
     warnings = []
     if no_bc_data:
         warnings.append("no_bc_data")
-    if has_ac_missing:
+    if has_core_ac_missing:
         warnings.append("ac_missing")
+    if has_high_ac_pair_missing:
+        warnings.append("high_ac_missing")
     if has_bc_missing:
         warnings.append("bc_missing")
     if has_ac_nr:
@@ -315,21 +348,26 @@ def task2_evidence_decision(row: Mapping) -> dict:
     if has_abg_borderline:
         warnings.append("abg_borderline")
 
-    if status == "complete_evidence":
+    covered = complete_for_rule and not borderline_only
+    if covered:
         confidence = 1.0
-    elif status == "abg_borderline":
+    elif complete_for_rule and borderline_only:
         confidence = 0.7
-    elif status in {"bc_missing", "ac_missing", "abg_missing", "nr_or_censored"}:
+    elif status in {"bc_missing", "ac_missing", "high_ac_missing", "abg_missing"}:
         confidence = 0.5
     else:
         confidence = 0.25
 
     return {
         "evidence_status": status,
-        "covered": status in {"complete_evidence", "abg_borderline"},
+        "covered": bool(covered),
+        "complete_for_rule": bool(complete_for_rule),
         "confidence": float(confidence),
         "warning_flags": tuple(dict.fromkeys(warnings)),
-        "has_ac_missing": bool(has_ac_missing),
+        "has_ac_missing": bool(has_core_ac_missing or has_high_ac_pair_missing),
+        "has_any_ac_missing": bool(has_ac_missing),
+        "has_core_ac_missing": bool(has_core_ac_missing),
+        "has_high_ac_pair_missing": bool(has_high_ac_pair_missing),
         "has_bc_missing": bool(has_bc_missing),
         "has_any_nr": bool(has_any_nr),
         "has_ac_nr": bool(has_ac_nr),
@@ -337,13 +375,15 @@ def task2_evidence_decision(row: Mapping) -> dict:
         "has_abg_missing": bool(has_abg_missing),
         "has_abg_censored": bool(has_abg_censored),
         "has_abg_borderline": bool(has_abg_borderline),
+        "has_clear_abg": bool(has_clear_abg),
+        "borderline_only": bool(borderline_only),
         "no_bc_data": bool(no_bc_data),
         "ac_present_count": int(ac_present_count),
         "bc_present_count": int(bc_present_count),
+        "high_ac_present_count": int(high_ac_present_count),
     }
 
-
-def predict_task3_type_from_rule(row: Mapping) -> str:
+def predict_task3_type_from_rule(row: Mapping) -> Optional[str]:
     peak_np = flag_value(row, "tymp_peak_daPa_np_zero")
     cmpl_np = flag_value(row, "tymp_peak_mmho_np_zero")
     peak_missing = flag_value(row, "tymp_peak_daPa_missing_zero")
@@ -351,10 +391,13 @@ def predict_task3_type_from_rule(row: Mapping) -> str:
 
     if peak_np and cmpl_np:
         return "B"
-    if peak is not None and peak <= -165:
+    if peak is None:
+        return None
+    if peak <= TASK3_C_PEAK_LOWER_DAPA:
+        return "B"
+    if peak <= TASK3_C_PEAK_UPPER_DAPA:
         return "C"
     return "A"
-
 
 def rule_decision(task_name: str, row: Mapping) -> RuleDecision:
     if task_name == "Task1":
@@ -393,8 +436,13 @@ def rule_decision(task_name: str, row: Mapping) -> RuleDecision:
         peak_missing = flag_value(row, "tymp_peak_daPa_missing_zero")
         cmpl_missing = flag_value(row, "tymp_peak_mmho_missing_zero")
         width_missing = flag_value(row, "tymp_Width_daPa_missing_zero")
-        any_missing = peak_missing or cmpl_missing or width_missing
         peak = None if peak_np or peak_missing else parse_numeric_value(row.get("tymp_peak_daPa"))
+
+        secondary_warnings = []
+        if cmpl_missing:
+            secondary_warnings.append("tymp_peak_mmho_missing")
+        if width_missing:
+            secondary_warnings.append("tymp_width_missing")
 
         if peak_np and cmpl_np:
             return RuleDecision(
@@ -403,51 +451,44 @@ def rule_decision(task_name: str, row: Mapping) -> RuleDecision:
                 covered=True,
                 evidence_status="np_evidence",
                 compatible_labels=("B",),
-                warning_flags=("np_evidence",),
+                warning_flags=tuple(dict.fromkeys(["np_evidence", *secondary_warnings])),
             )
-        if any_missing:
+        if peak is None:
             return RuleDecision(
                 label=None,
                 confidence=0.25,
                 covered=False,
                 evidence_status="missing_tymp_data",
-                warning_flags=("missing_tymp_data",),
+                warning_flags=tuple(dict.fromkeys(["missing_tymp_peak", *secondary_warnings])),
             )
-        if peak is not None and -100 <= peak <= 100:
+        if peak <= TASK3_C_PEAK_LOWER_DAPA:
             return RuleDecision(
-                label="A",
-                confidence=1.0,
+                label="B",
+                confidence=0.8,
                 covered=True,
-                evidence_status="complete_evidence",
-                compatible_labels=("A",),
+                evidence_status="extreme_negative_peak_b",
+                compatible_labels=("B",),
+                warning_flags=tuple(dict.fromkeys(["extreme_negative_peak_b", *secondary_warnings])),
             )
-        if peak is not None and -165 < peak < -100:
-            return RuleDecision(
-                label="A",
-                confidence=0.5,
-                covered=True,
-                evidence_status="borderline_a_c",
-                compatible_labels=("A", "C"),
-                warning_flags=("borderline_a_c",),
-            )
-        if peak is not None and peak <= -165:
+        if peak <= TASK3_C_PEAK_UPPER_DAPA:
             return RuleDecision(
                 label="C",
-                confidence=1.0,
+                confidence=0.6,
                 covered=True,
-                evidence_status="complete_evidence",
-                compatible_labels=("C",),
+                evidence_status="negative_peak_c_low_confidence",
+                compatible_labels=("C", "B"),
+                warning_flags=tuple(dict.fromkeys(["negative_peak_c_low_confidence", *secondary_warnings])),
             )
         return RuleDecision(
             label="A",
-            confidence=0.7,
+            confidence=1.0,
             covered=True,
             evidence_status="complete_evidence",
             compatible_labels=("A",),
+            warning_flags=tuple(dict.fromkeys(secondary_warnings)),
         )
 
     raise KeyError(f"Unknown task: {task_name}")
-
 
 def score_rule_decision(task_name: str, row: Mapping, pred_name: str) -> float:
     decision = rule_decision(task_name, row)
@@ -481,7 +522,7 @@ def legacy_score_task3_expert_consistency(row: Mapping, pred_name: str) -> float
     if p == "A":
         if peak is not None and -100 <= peak <= 100:
             return 1.0
-        if peak is not None and -165 < peak < -100:
+        if peak is not None and -150 < peak < -100:
             return 0.5
         return -0.2
 
@@ -493,7 +534,7 @@ def legacy_score_task3_expert_consistency(row: Mapping, pred_name: str) -> float
         return -0.2
 
     if p == "C":
-        if peak is not None and peak <= -165:
+        if peak is not None and peak <= -150:
             return 1.0
         if peak is not None and peak <= -100:
             return 0.5

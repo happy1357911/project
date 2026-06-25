@@ -12,6 +12,7 @@ from error_analysis_v74 import load_prediction_rows
 
 
 GROUP_COLS = ["config_name", "exp_name", "seed", "prediction_file", "evaluation_mode", "task", "label_col"]
+REQUIRED_PREDICTION_COLUMNS = ["true_label", "pred_label", "confidence"]
 
 
 def parse_thresholds(text: str) -> List[float]:
@@ -49,6 +50,8 @@ def multiclass_brier_score(true_label: str, probs: Dict[str, float]) -> float:
 
 def add_calibration_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    if "confidence" not in out.columns and "model_confidence" in out.columns:
+        out["confidence"] = out["model_confidence"]
     out["confidence"] = pd.to_numeric(out["confidence"], errors="coerce")
     out["correct_bool"] = out["true_label"].astype(str).eq(out["pred_label"].astype(str))
     if "correct" in out.columns:
@@ -171,11 +174,31 @@ def threshold_curve(df: pd.DataFrame, thresholds: List[float]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def validate_prediction_rows(df: pd.DataFrame, args) -> pd.DataFrame:
+    if df.empty:
+        raise FileNotFoundError(
+            "No prediction rows found for calibration. "
+            f"prediction_rows={args.prediction_rows or '<auto>'}, "
+            f"results_dir={args.results_dir}, mode={args.mode}"
+        )
+    if "confidence" not in df.columns and "model_confidence" in df.columns:
+        df = df.copy()
+        df["confidence"] = df["model_confidence"]
+    missing = [col for col in REQUIRED_PREDICTION_COLUMNS if col not in df.columns]
+    if missing:
+        raise ValueError(
+            "Prediction rows are missing required calibration columns: "
+            + ", ".join(missing)
+        )
+    return df
+
+
 def run(args):
     if args.prediction_rows:
         df = pd.read_csv(args.prediction_rows)
     else:
         df = load_prediction_rows(Path(args.results_dir), args.mode)
+    df = validate_prediction_rows(df, args)
     df = add_calibration_columns(df)
 
     out_dir = Path(args.output_dir)

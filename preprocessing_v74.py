@@ -50,10 +50,14 @@ TASK2_EAR_LEVEL_FEATURES = [
     "ac_1000Hz",
     "ac_2000Hz",
     "ac_4000Hz",
+    "ac_6000Hz",
+    "ac_8000Hz",
     "ac_500Hz_nr",
     "ac_1000Hz_nr",
     "ac_2000Hz_nr",
     "ac_4000Hz_nr",
+    "ac_6000Hz_nr",
+    "ac_8000Hz_nr",
     "bc_500Hz",
     "bc_1000Hz",
     "bc_2000Hz",
@@ -118,12 +122,12 @@ TASK_INFO = {
         "feature_cols": TASK1_EAR_LEVEL_FEATURES,
     },
     "Task2": {
-        "csv": "task2_3_pure_data.csv",
+        "csv": "task2_3_pure_data(6_24).xlsx",
         "label_cols": ["hearing_type"],
         "feature_cols": TASK2_EAR_LEVEL_FEATURES,
     },
     "Task3": {
-        "csv": "task2_3_pure_data.csv",
+        "csv": "task2_3_pure_data(6_24).xlsx",
         "label_cols": ["tymp_type"],
         "feature_cols": TASK3_EAR_LEVEL_FEATURES,
     },
@@ -614,143 +618,40 @@ def task1_evidence_status(row: Mapping) -> dict:
     return {
         "evidence_status": "complete_evidence" if has_pta else "no_pta_data",
         "baseline_covered": bool(has_pta),
+        "complete_for_rule": bool(has_pta),
         "has_missing": bool(not has_pta),
         "rule_confidence": 1.0 if has_pta else 0.0,
         "warning_reasons": "" if has_pta else "no_pta_data",
     }
 
-
 def task2_evidence_status(row: Mapping) -> dict:
-    has_ac_missing = False
-    has_bc_missing = False
-    has_any_nr = False
-    has_ac_nr = False
-    has_bc_nr = False
-    has_abg_censored = False
-    has_abg_missing = False
-    has_abg_borderline = False
-    bc_present_count = 0
-    ac_present_count = 0
-
-    for hz in TASK2_ABG_FREQS:
-        ac_col = f"ac_{hz}Hz"
-        bc_col = f"bc_{hz}Hz"
-        abg_col = f"abg_{hz}Hz"
-        ac_value = clean_value_none(row.get(ac_col))
-        bc_value = clean_value_none(row.get(bc_col))
-        ac_nr = clean_value_zero(row.get(f"{ac_col}_nr")) >= 0.5
-        bc_nr = clean_value_zero(row.get(f"{bc_col}_nr")) >= 0.5
-        bc_missing_flag = clean_value_zero(row.get(f"{bc_col}_missing")) >= 0.5
-        abg_missing_flag = clean_value_zero(row.get(f"{abg_col}_missing")) >= 0.5
-        abg_censored_flag = clean_value_zero(row.get(f"{abg_col}_censored")) >= 0.5
-
-        ac_missing = ac_value is None and not ac_nr
-        bc_missing = (bc_value is None and not bc_nr) or bc_missing_flag
-        abg_missing = abg_missing_flag or ac_missing or bc_missing
-        abg_censored = abg_censored_flag or ac_nr or bc_nr
-
-        has_ac_missing = has_ac_missing or ac_missing
-        has_bc_missing = has_bc_missing or bc_missing
-        has_ac_nr = has_ac_nr or ac_nr
-        has_bc_nr = has_bc_nr or bc_nr
-        has_any_nr = has_any_nr or ac_nr or bc_nr
-        has_abg_missing = has_abg_missing or abg_missing
-        has_abg_censored = has_abg_censored or abg_censored
-        ac_present_count += int(ac_value is not None)
-        bc_present_count += int(bc_value is not None)
-        if not abg_missing and ac_value is not None and bc_value is not None:
-            abg = ac_value - bc_value
-            has_abg_borderline = has_abg_borderline or (8.0 <= abg <= 12.0)
-
-    no_bc_data = bc_present_count == 0
-    if no_bc_data:
-        status = "no_bc_data"
-    elif has_any_nr or has_abg_censored:
-        status = "nr_or_censored"
-    elif has_bc_missing:
-        status = "bc_missing"
-    elif has_ac_missing:
-        status = "ac_missing"
-    elif has_abg_missing:
-        status = "abg_missing"
-    elif has_abg_borderline:
-        status = "abg_borderline"
-    else:
-        status = "complete_evidence"
-
-    covered = status in {"complete_evidence", "abg_borderline"}
-    warnings = []
-    if no_bc_data:
-        warnings.append("no_bc_data")
-    if has_ac_missing:
-        warnings.append("ac_missing")
-    if has_bc_missing:
-        warnings.append("bc_missing")
-    if has_ac_nr:
-        warnings.append("ac_nr")
-    if has_bc_nr:
-        warnings.append("bc_nr")
-    if has_abg_missing:
-        warnings.append("abg_missing")
-    if has_abg_censored:
-        warnings.append("abg_censored")
-    if has_abg_borderline:
-        warnings.append("abg_borderline")
-
-    if status == "complete_evidence":
-        confidence = 1.0
-    elif status == "abg_borderline":
-        confidence = 0.7
-    elif status in {"bc_missing", "ac_missing", "abg_missing", "nr_or_censored"}:
-        confidence = 0.5
-    else:
-        confidence = 0.25
-
+    detail = task2_evidence_decision(row)
     return {
-        "evidence_status": status,
-        "baseline_covered": bool(covered),
-        "has_ac_missing": bool(has_ac_missing),
-        "has_bc_missing": bool(has_bc_missing),
-        "has_any_nr": bool(has_any_nr),
-        "has_ac_nr": bool(has_ac_nr),
-        "has_bc_nr": bool(has_bc_nr),
-        "has_abg_missing": bool(has_abg_missing),
-        "has_abg_censored": bool(has_abg_censored),
-        "has_abg_borderline": bool(has_abg_borderline),
-        "no_bc_data": bool(no_bc_data),
-        "ac_present_count": int(ac_present_count),
-        "bc_present_count": int(bc_present_count),
-        "rule_confidence": float(confidence),
-        "warning_reasons": ";".join(warnings),
+        **{key: value for key, value in detail.items() if key not in {"covered", "confidence", "warning_flags"}},
+        "baseline_covered": bool(detail.get("covered", False)),
+        "complete_for_rule": bool(detail.get("complete_for_rule", False)),
+        "rule_confidence": float(detail.get("confidence", 0.0) or 0.0),
+        "warning_reasons": ";".join(detail.get("warning_flags", ())),
     }
-
 
 def task3_evidence_status(row: Mapping) -> dict:
-    np_cols = [col for col in row if str(col).endswith("_np_zero")]
-    missing_cols = [col for col in row if str(col).endswith("_missing_zero")]
-    has_np = any(clean_value_zero(row.get(col)) >= 0.5 for col in np_cols)
-    has_missing = any(clean_value_zero(row.get(col)) >= 0.5 for col in missing_cols)
-    if has_missing:
-        status = "missing_tymp_data"
-    elif has_np:
-        status = "np_evidence"
-    else:
-        status = "complete_evidence"
+    decision = shared_rule_decision("Task3", row)
     return {
-        "evidence_status": status,
-        "baseline_covered": bool(not has_missing),
-        "has_np": bool(has_np),
-        "has_missing": bool(has_missing),
-        "rule_confidence": 0.5 if has_missing else 1.0,
-        "warning_reasons": "missing_tymp_data" if has_missing else ("np_evidence" if has_np else ""),
+        "evidence_status": decision.evidence_status,
+        "baseline_covered": bool(decision.covered),
+        "complete_for_rule": bool(decision.covered),
+        "has_np": bool(decision.evidence_status == "np_evidence"),
+        "has_missing": bool("missing" in decision.evidence_status),
+        "rule_confidence": float(decision.confidence),
+        "warning_reasons": ";".join(decision.warning_flags),
     }
-
 
 def evidence_status(task_name: str, row: Mapping) -> dict:
     decision = shared_rule_decision(task_name, row)
     out = {
         "evidence_status": decision.evidence_status,
         "baseline_covered": bool(decision.covered),
+        "complete_for_rule": bool(decision.covered),
         "rule_confidence": float(decision.confidence),
         "warning_reasons": ";".join(decision.warning_flags),
         "compatible_labels": "|".join(decision.compatible_labels),
@@ -767,10 +668,9 @@ def evidence_status(task_name: str, row: Mapping) -> dict:
         return out
     if task_name == "Task3":
         out["has_np"] = bool(decision.evidence_status == "np_evidence")
-        out["has_missing"] = bool(decision.evidence_status == "missing_tymp_data")
+        out["has_missing"] = bool("missing" in decision.evidence_status)
         return out
     raise KeyError(f"Unknown task: {task_name}")
-
 
 def rule_prediction(task_name: str, row: Mapping):
     return shared_rule_decision(task_name, row).label
@@ -788,8 +688,11 @@ def clinical_warning_summary(task_name: str, row: Mapping, model_pred: Optional[
     evidence = evidence_status(task_name, row)
     forced_rule = normalize_prediction(decision.label)
     baseline_covered = bool(decision.covered)
+    complete_for_rule = bool(evidence.get("complete_for_rule", baseline_covered))
     abstain_rule = forced_rule if baseline_covered else INSUFFICIENT_EVIDENCE_LABEL
     warning_reasons = list(decision.warning_flags)
+    if not complete_for_rule:
+        warning_reasons.append("incomplete_rule_data")
     if not baseline_covered:
         warning_reasons.append("insufficient_rule_evidence")
     conflict = False
@@ -803,7 +706,9 @@ def clinical_warning_summary(task_name: str, row: Mapping, model_pred: Optional[
         **evidence,
         "forced_rule_label": forced_rule,
         "abstain_rule_label": abstain_rule,
+        "complete_for_rule": complete_for_rule,
         "compatible_labels": "|".join(decision.compatible_labels),
         "rule_model_conflict": bool(conflict),
         "warning_reasons": ";".join(dict.fromkeys(warning_reasons)),
     }
+

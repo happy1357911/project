@@ -1,5 +1,32 @@
 # train_v74.py 完整訓練流程圖
 
+<!-- 2026-06-25-p0-p4-gpt-analysis-update -->
+
+## 2026-06-25 Current run_all Flow
+
+| Step | Script | Purpose | Main Outputs |
+|---|---|---|---|
+| 0 | `python -m py_compile` | Compile all root Python files | No syntax error |
+| 1 | `split_protocol_v74.py` | Build grouped locked-test split | `split_manifest.csv`, `split_summary.csv` |
+| 2 | `train_v74.py` | Train 15 recommended + 5 ablation JSON configs | checkpoints, prediction rows |
+| 3 | `baseline_rules_v74.py` | Clinical rule baseline | rule summary and predictions |
+| 4 | `ml_baselines_v74.py` | Classical ML baselines | `ml_baseline_summary_5seed.csv` |
+| 5 | `error_analysis_v74.py --mode all` | Configured/no-support/locked-test three-way analysis | `three_way_conflict_summary.csv`, `decision_safety_summary.csv` |
+| 6 | `evaluate_v74.py` | Paper tables and figures | summary tables, `statistical_summary_all_configs.csv` |
+| 7a | `hybrid_evaluation_v74.py --mode no_support` | No-support hybrid evaluation | `main_hybrid_summary.csv` |
+| 7b | `hybrid_evaluation_v74.py --mode locked_test` | Locked-test hybrid evaluation | `main_hybrid_summary_locked_test.csv` |
+| 8a | `calibration_analysis_v74.py` | General calibration | ECE, Brier, threshold curve |
+| 8b | `calibration_analysis_v74.py --mode locked_test` | Locked-test calibration | `calibration_analysis_locked_test/` |
+| 9 | `artificial_missingness_v74.py` | Missingness robustness | degradation, per-class, compensation summaries |
+| 10 | `feature_importance_v74.py` | Feature importance and inference-time ablation | permutation and ablation summaries |
+| 11 | `model_profile_v74.py` | Optional edge/profile estimate | model profile outputs |
+| 12 | `run_locked_test_v74.py` | Isolated formal locked-test pipeline | `paper_v74_locked_test/`, `results_v74_locked_test/` |
+| 13 | `sync_all_outputs_v74.py` | Sync formal package | `sync_manifest_v74.json` |
+| 14 | internal verify | Check expected outputs | No missing output error |
+
+<!-- /2026-06-25-p0-p4-gpt-analysis-update -->
+
+
 <!-- 2026-06-20-edge-profile-deferred -->
 
 ## 2026-06-20 決策：暫不執行 edge 端估計

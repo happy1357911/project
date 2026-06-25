@@ -144,6 +144,7 @@ def verify_key_outputs(args: argparse.Namespace) -> None:
 
     assert_file_exists(paper_dir / "tables" / "summary_no_support_all_configs.csv")
     assert_file_exists(paper_dir / "tables" / "summary_locked_test_no_support_all_configs.csv")
+    assert_file_exists(paper_dir / "tables" / "statistical_summary_all_configs.csv")
     assert_file_exists(paper_dir / "tables" / "main_hybrid_summary.csv")
     assert_file_exists(paper_dir / "tables" / "main_hybrid_summary_locked_test.csv")
     assert_file_exists(results_dir / "rule_baselines_phase3" / "rule_baseline_summary.csv")
@@ -154,9 +155,15 @@ def verify_key_outputs(args: argparse.Namespace) -> None:
     assert_file_exists(paper_dir / "error_analysis" / "three_way_conflict_summary.csv")
     assert_file_exists(results_dir / "split_protocol" / "split_manifest.csv")
     assert_file_exists(results_dir / "split_protocol" / "split_summary.csv")
-    assert_file_exists(results_dir / "calibration_analysis" / "calibration_summary.csv")
-    assert_file_exists(results_dir / "calibration_analysis" / "calibration_ece_bins.csv")
-    assert_file_exists(results_dir / "calibration_analysis" / "confidence_threshold_curve.csv")
+    if args.skip_calibration:
+        print("[INFO] Calibration checks skipped because --skip-calibration is set.")
+    else:
+        assert_file_exists(results_dir / "calibration_analysis" / "calibration_summary.csv")
+        assert_file_exists(results_dir / "calibration_analysis" / "calibration_ece_bins.csv")
+        assert_file_exists(results_dir / "calibration_analysis" / "confidence_threshold_curve.csv")
+        assert_file_exists(results_dir / "calibration_analysis_locked_test" / "calibration_summary.csv")
+        assert_file_exists(results_dir / "calibration_analysis_locked_test" / "calibration_ece_bins.csv")
+        assert_file_exists(results_dir / "calibration_analysis_locked_test" / "confidence_threshold_curve.csv")
     if args.skip_artificial_missingness:
         print("[INFO] Artificial missingness checks skipped because --skip-artificial-missingness is set.")
     else:
@@ -197,7 +204,27 @@ def verify_key_outputs(args: argparse.Namespace) -> None:
     missing_sources = manifest.get("missing_sources") or []
     if missing_sources:
         raise RuntimeError(f"all/ sync has missing sources: {', '.join(missing_sources)}")
+    if manifest.get("package_type") != args.package_type:
+        raise RuntimeError(
+            f"all/ package_type mismatch: expected {args.package_type}, got {manifest.get('package_type')}"
+        )
+    expected_raw_data = bool(args.include_raw_data or args.package_type == "execution_ready")
+    expected_checkpoints = bool(args.include_checkpoints or args.package_type == "execution_ready")
+    expected_large_rows = bool(args.include_large_prediction_rows or args.package_type == "execution_ready")
+    if bool(manifest.get("include_raw_data")) != expected_raw_data:
+        raise RuntimeError("all/ include_raw_data does not match run_all arguments")
+    if bool(manifest.get("include_checkpoints")) != expected_checkpoints:
+        raise RuntimeError("all/ include_checkpoints does not match run_all arguments")
+    if bool(manifest.get("include_large_prediction_rows")) != expected_large_rows:
+        raise RuntimeError("all/ include_large_prediction_rows does not match run_all arguments")
     print("all/ sync missing_sources=[]")
+    print(
+        "all/ package flags: "
+        f"package_type={manifest.get('package_type')}, "
+        f"raw_data={manifest.get('include_raw_data')}, "
+        f"checkpoints={manifest.get('include_checkpoints')}, "
+        f"large_prediction_rows={manifest.get('include_large_prediction_rows')}"
+    )
 
 
 def print_file_coverage() -> None:
@@ -231,6 +258,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--locked-paper-dir", default="paper_v74_locked_test")
     parser.add_argument("--seeds", default="0,1,2,3,4", help="Comma-separated seeds.")
     parser.add_argument("--config-preset", default="all", help="train_v74.py config preset.")
+    parser.add_argument("--run-config-file", default="configs/run_configs_v74.json", help="External JSON run config file passed to train_v74.py and locked-test training.")
     parser.add_argument("--experiments", default="full,no_meta,no_irl,single_task")
     parser.add_argument("--single-task-target", default="all")
     parser.add_argument("--heatmap-mode", default="seed0")
@@ -253,6 +281,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-model-profile", action="store_true")
     parser.add_argument("--require-edge-profile", action="store_true", help="Require model_profile_summary.csv and deployment_profile.csv during final verification.")
     parser.add_argument("--skip-sync-all", action="store_true")
+    parser.add_argument("--package-type", default="analysis_only", choices=["analysis_only", "execution_ready", "custom"], help="Package declaration written to all/sync_manifest_v74.json.")
+    parser.add_argument("--include-raw-data", action="store_true", help="Include active raw data files in all/. Automatically enabled by --package-type execution_ready.")
+    parser.add_argument("--include-checkpoints", action="store_true", help="Include .pth/.pt/.ckpt checkpoints in all/. Automatically enabled by --package-type execution_ready.")
+    parser.add_argument("--include-large-prediction-rows", action="store_true", help="Include row-level prediction CSVs in all/. Automatically enabled by --package-type execution_ready.")
     parser.add_argument("--quick-ml-baseline", action="store_true")
     parser.add_argument("--profile-ml-baselines", action="store_true")
     parser.add_argument("--skip-profile-ml-baselines", action="store_true")
@@ -324,6 +356,8 @@ def main() -> int:
                     args.single_task_target,
                     "--config_preset",
                     args.config_preset,
+                    "--run_config_file",
+                    args.run_config_file,
                     "--locked_split_manifest",
                     str(split_manifest_path),
                 ],
@@ -376,7 +410,7 @@ def main() -> int:
                     "--output_dir",
                     str(Path(args.paper_dir) / "error_analysis"),
                     "--mode",
-                    "both",
+                    "all",
                     "--rule_predictions",
                     str(Path(args.results_dir) / "rule_baselines_phase3" / "rule_baseline_predictions.csv"),
                 ],
@@ -454,7 +488,7 @@ def main() -> int:
 
     if not args.skip_calibration:
         invoke_step(
-            "8. Calibration / confidence analysis",
+            "8a. Calibration / confidence analysis",
             new_python_command(
                 args,
                 [
@@ -465,6 +499,26 @@ def main() -> int:
                     str(Path(args.results_dir) / "calibration_analysis"),
                     "--mode",
                     "both",
+                    "--bins",
+                    "10",
+                    "--thresholds",
+                    "0.0,0.5,0.6,0.7,0.8,0.9,0.95",
+                ],
+            ),
+            args.dry_run,
+        )
+        invoke_step(
+            "8b. Locked-test calibration / confidence analysis",
+            new_python_command(
+                args,
+                [
+                    "calibration_analysis_v74.py",
+                    "--results_dir",
+                    args.results_dir,
+                    "--output_dir",
+                    str(Path(args.results_dir) / "calibration_analysis_locked_test"),
+                    "--mode",
+                    "locked_test",
                     "--bins",
                     "10",
                     "--thresholds",
@@ -594,12 +648,16 @@ def main() -> int:
             args.seeds,
             "--config-preset",
             args.config_preset,
+            "--run-config-file",
+            args.run_config_file,
             "--experiments",
             args.experiments,
             "--single-task-target",
             args.single_task_target,
             "--rule-confidence-threshold",
             str(args.rule_confidence_threshold),
+            "--model-confidence-threshold",
+            str(args.model_confidence_threshold),
             "--heatmap-mode",
             args.heatmap_mode,
         ]
@@ -612,6 +670,9 @@ def main() -> int:
         )
 
     if not args.skip_sync_all:
+        include_raw_data = args.include_raw_data or args.package_type == "execution_ready"
+        include_checkpoints = args.include_checkpoints or args.package_type == "execution_ready"
+        include_large_prediction_rows = args.include_large_prediction_rows or args.package_type == "execution_ready"
         sync_args = [
             "sync_all_outputs_v74.py",
             "--root",
@@ -619,8 +680,15 @@ def main() -> int:
             "--all-dir",
             args.all_dir,
             "--clean",
-            "--skip-large-predictions",
+            "--package-type",
+            args.package_type,
         ]
+        if not include_large_prediction_rows:
+            sync_args.append("--skip-large-predictions")
+        if include_raw_data:
+            sync_args.append("--include-raw-data")
+        if include_checkpoints:
+            sync_args.append("--include-checkpoints")
         if args.skip_model_profile:
             sync_args.extend(["--exclude-dir", "results_v74/model_profile"])
         if args.skip_feature_importance:
@@ -629,6 +697,7 @@ def main() -> int:
             sync_args.extend(["--exclude-dir", "results_v74/artificial_missingness"])
         if args.skip_calibration:
             sync_args.extend(["--exclude-dir", "results_v74/calibration_analysis"])
+            sync_args.extend(["--exclude-dir", "results_v74/calibration_analysis_locked_test"])
         if args.skip_ml_baseline:
             sync_args.extend(["--exclude-dir", "results_v74/ml_baselines"])
         invoke_step(

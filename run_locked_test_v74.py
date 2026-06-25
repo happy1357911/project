@@ -4,12 +4,24 @@ import sys
 from pathlib import Path
 
 
-LOCKED_EXPECTED_FILES = [
+LOCKED_EXPECTED_PAPER_FILES = [
     Path("tables/summary_locked_test_no_support_all_configs.csv"),
     Path("tables/all_runs_locked_test_no_support_all_configs.csv"),
     Path("tables/per_class_locked_test_no_support_all_configs.csv"),
     Path("hybrid_evaluation/hybrid_locked_test_summary.csv"),
     Path("tables/main_hybrid_summary_locked_test.csv"),
+]
+
+LOCKED_EXPECTED_ERROR_ANALYSIS_FILES = [
+    Path("error_analysis/prediction_rows_all.csv"),
+    Path("error_analysis/rule_true_model_conflicts.csv"),
+    Path("error_analysis/three_way_conflict_summary.csv"),
+]
+
+LOCKED_EXPECTED_RESULT_FILES = [
+    Path("calibration_analysis/calibration_summary.csv"),
+    Path("calibration_analysis/calibration_ece_bins.csv"),
+    Path("calibration_analysis/confidence_threshold_curve.csv"),
 ]
 
 
@@ -80,6 +92,8 @@ def compile_sources(root: Path, dry_run: bool) -> None:
         "evaluate_v74.py",
         "baseline_rules_v74.py",
         "hybrid_evaluation_v74.py",
+        "error_analysis_v74.py",
+        "calibration_analysis_v74.py",
     ]
     run_step("Compile locked-test dependencies", cmd, root, dry_run)
 
@@ -96,15 +110,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--locked-test-ratio", type=float, default=0.2)
     parser.add_argument("--seeds", default="0,1,2,3,4")
     parser.add_argument("--config-preset", default="all", choices=["recommended", "ablation", "all"])
+    parser.add_argument("--run-config-file", default="configs/run_configs_v74.json", help="External JSON run config file passed to train_v74.py.")
     parser.add_argument("--experiments", default="full,no_meta,no_irl,single_task")
     parser.add_argument("--single-task-target", default="all", choices=["Task1", "Task2", "Task3", "all"])
     parser.add_argument("--rule-confidence-threshold", type=float, default=0.8)
+    parser.add_argument("--model-confidence-threshold", type=float, default=0.6)
     parser.add_argument("--heatmap-mode", default="seed0", choices=["none", "seed0", "all"])
     parser.add_argument("--refresh-split-protocol", action="store_true")
     parser.add_argument("--skip-train", action="store_true")
     parser.add_argument("--skip-evaluate", action="store_true")
     parser.add_argument("--skip-rule-baseline", action="store_true")
     parser.add_argument("--skip-hybrid", action="store_true")
+    parser.add_argument("--skip-error-analysis", action="store_true")
+    parser.add_argument("--skip-calibration", action="store_true")
     parser.add_argument("--compile-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-overwrite", action="store_true")
@@ -166,6 +184,8 @@ def main() -> None:
                 str(results_dir),
                 "--config_preset",
                 args.config_preset,
+                "--run_config_file",
+                args.run_config_file,
                 "--seeds",
                 args.seeds,
                 "--experiments",
@@ -232,13 +252,63 @@ def main() -> None:
                 "locked_test",
                 "--rule_confidence_threshold",
                 str(args.rule_confidence_threshold),
+                "--model_confidence_threshold",
+                str(args.model_confidence_threshold),
             ],
             root,
             args.dry_run,
         )
 
+    locked_error_dir = paper_dir / "error_analysis"
+    if not args.skip_error_analysis:
+        run_step(
+            "Build locked-test error and three-way conflict analysis",
+            [
+                sys.executable,
+                "error_analysis_v74.py",
+                "--results_dir",
+                str(results_dir),
+                "--output_dir",
+                str(locked_error_dir),
+                "--mode",
+                "locked_test",
+                "--rule_predictions",
+                str(rule_output_dir / "rule_baseline_predictions.csv"),
+            ],
+            root,
+            args.dry_run,
+        )
+
+    if not args.skip_calibration:
+        calibration_cmd = [
+            sys.executable,
+            "calibration_analysis_v74.py",
+            "--output_dir",
+            str(results_dir / "calibration_analysis"),
+            "--mode",
+            "locked_test",
+            "--bins",
+            "10",
+            "--thresholds",
+            "0.0,0.5,0.6,0.7,0.8,0.9,0.95",
+        ]
+        if not args.skip_error_analysis:
+            calibration_cmd.extend(["--prediction_rows", str(locked_error_dir / "prediction_rows_all.csv")])
+        else:
+            calibration_cmd.extend(["--results_dir", str(results_dir)])
+        run_step(
+            "Compute locked-test calibration and confidence curves",
+            calibration_cmd,
+            root,
+            args.dry_run,
+        )
+
     if not args.dry_run:
-        missing = [str(paper_dir / path) for path in LOCKED_EXPECTED_FILES if not (paper_dir / path).exists()]
+        missing = [str(paper_dir / path) for path in LOCKED_EXPECTED_PAPER_FILES if not (paper_dir / path).exists()]
+        if not args.skip_error_analysis:
+            missing.extend(str(paper_dir / path) for path in LOCKED_EXPECTED_ERROR_ANALYSIS_FILES if not (paper_dir / path).exists())
+        if not args.skip_calibration:
+            missing.extend(str(results_dir / path) for path in LOCKED_EXPECTED_RESULT_FILES if not (results_dir / path).exists())
         if missing:
             raise FileNotFoundError("Missing expected locked-test outputs:\n" + "\n".join(missing))
         print(f"\nLocked-test pipeline completed: {paper_dir}")

@@ -186,6 +186,7 @@ def load_rule_predictions(path: Path) -> pd.DataFrame:
         "forced_pred_label",
         "abstain_pred_label",
         "baseline_covered",
+        "complete_for_rule",
         "evidence_status",
         "rule_confidence",
         "warning_reasons",
@@ -210,6 +211,7 @@ def attach_rule_predictions(model_df: pd.DataFrame, rule_df: pd.DataFrame) -> pd
         "forced_pred_label",
         "abstain_pred_label",
         "baseline_covered",
+        "complete_for_rule",
         "evidence_status",
         "rule_confidence",
         "warning_reasons",
@@ -223,6 +225,12 @@ def attach_rule_predictions(model_df: pd.DataFrame, rule_df: pd.DataFrame) -> pd
     )
     if "baseline_covered" in merged.columns:
         merged["baseline_covered"] = parse_bool_series(merged["baseline_covered"])
+    if "complete_for_rule" in merged.columns:
+        complete_raw = merged["complete_for_rule"]
+        complete = parse_bool_series(complete_raw)
+        if "baseline_covered" in merged.columns:
+            complete = complete.mask(complete_raw.isna(), merged["baseline_covered"])
+        merged["complete_for_rule"] = complete.astype(bool)
     if "rule_confidence" in merged.columns:
         merged["rule_confidence"] = pd.to_numeric(merged["rule_confidence"], errors="coerce")
     return merged
@@ -301,12 +309,14 @@ def build_confusion_pairs(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
     cols = ["config_name", "exp_name", "seed", "prediction_file", "evaluation_mode", "task", "label_col", "true_label", "pred_label"]
-    grouped = (
-        df.groupby(cols, dropna=False)
-        .size()
-        .reset_index(name="n")
-        .sort_values(["task", "label_col", "n"], ascending=[True, True, False])
-    )
+    existing_cols = [col for col in cols if col in df.columns]
+    grouped = df.groupby(existing_cols, dropna=False).size().reset_index(name="n")
+    sort_cols = [col for col in ["task", "label_col", "n"] if col in grouped.columns]
+    if sort_cols:
+        ascending = [True] * len(sort_cols)
+        if "n" in sort_cols:
+            ascending[sort_cols.index("n")] = False
+        grouped = grouped.sort_values(sort_cols, ascending=ascending)
     grouped["is_error_pair"] = grouped["true_label"].astype(str) != grouped["pred_label"].astype(str)
     return grouped
 
@@ -474,6 +484,7 @@ def build_rule_true_model_conflicts(df: pd.DataFrame) -> pd.DataFrame:
         "model_correct_when_rule_abstained",
         "model_wrong_when_rule_covered",
         "baseline_covered",
+        "complete_for_rule",
         "evidence_status",
         "rule_confidence",
         "warning_reasons",
@@ -573,6 +584,56 @@ def build_task2_clinical_subgroups(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def build_decision_safety_summary(df: pd.DataFrame, low_confidence_threshold: float = 0.6) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out["low_model_confidence"] = numeric_column(out, "confidence").lt(float(low_confidence_threshold))
+    out["rule_abstained"] = (
+        out.get("abstain_pred_label", pd.Series("", index=out.index))
+        .fillna("")
+        .astype(str)
+        .eq(INSUFFICIENT_EVIDENCE_LABEL)
+    )
+    out["incomplete_rule_data"] = ~out.get("complete_for_rule", pd.Series(True, index=out.index)).fillna(True).astype(bool)
+    out["rule_not_covered"] = ~out.get("baseline_covered", pd.Series(True, index=out.index)).fillna(True).astype(bool)
+    forced = out.get("forced_pred_label", pd.Series(INSUFFICIENT_EVIDENCE_LABEL, index=out.index)).fillna(INSUFFICIENT_EVIDENCE_LABEL).astype(str)
+    out["rule_model_conflict_flag"] = forced.ne(INSUFFICIENT_EVIDENCE_LABEL) & forced.ne(out["pred_label"].astype(str))
+    out["task2_missing_or_censored_flag"] = out.get("task2_has_missing_or_censored", pd.Series(False, index=out.index)).fillna(False).astype(bool)
+    out["task2_nr_flag"] = out.get("task2_has_any_nr", pd.Series(False, index=out.index)).fillna(False).astype(bool)
+    out["task3_missing_or_np_flag"] = (
+        out.get("task3_has_missing", pd.Series(False, index=out.index)).fillna(False).astype(bool)
+        | out.get("task3_has_np", pd.Series(False, index=out.index)).fillna(False).astype(bool)
+    )
+
+    group_cols = [
+        col for col in ["config_name", "exp_name", "seed", "prediction_file", "evaluation_mode", "task", "label_col"]
+        if col in out.columns
+    ]
+    grouped = out.groupby(group_cols, dropna=False) if group_cols else [((), out)]
+    rows = []
+    for key, sub in grouped:
+        key_tuple = key if isinstance(key, tuple) else (key,)
+        row = dict(zip(group_cols, key_tuple))
+        labels = sorted(set(sub["true_label"].astype(str)) | set(sub["pred_label"].astype(str)))
+        row.update({
+            "n": int(len(sub)),
+            "accuracy": float(sub["correct"].mean()) if "correct" in sub.columns and len(sub) else np.nan,
+            "macro_f1": float(f1_score(sub["true_label"].astype(str), sub["pred_label"].astype(str), labels=labels, average="macro", zero_division=0)) if labels else np.nan,
+            "low_model_confidence_rate": float(sub["low_model_confidence"].mean()),
+            "rule_abstained_rate": float(sub["rule_abstained"].mean()),
+            "incomplete_rule_data_rate": float(sub["incomplete_rule_data"].mean()),
+            "rule_not_covered_rate": float(sub["rule_not_covered"].mean()),
+            "rule_model_conflict_rate": float(sub["rule_model_conflict_flag"].mean()),
+            "task2_missing_or_censored_rate": float(sub["task2_missing_or_censored_flag"].mean()),
+            "task2_nr_rate": float(sub["task2_nr_flag"].mean()),
+            "task3_missing_or_np_rate": float(sub["task3_missing_or_np_flag"].mean()),
+            "low_confidence_threshold": float(low_confidence_threshold),
+        })
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def build_task2_confusion_focus(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "task" not in df.columns:
         return pd.DataFrame()
@@ -627,6 +688,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
         "three_way_conflict_summary": output_dir / "three_way_conflict_summary.csv",
         "task2_clinical_subgroups": output_dir / "task2_clinical_subgroups.csv",
         "task2_confusion_focus": output_dir / "task2_confusion_focus.csv",
+        "decision_safety_summary": output_dir / "decision_safety_summary.csv",
         "manifest": output_dir / "error_analysis_manifest.json",
     }
 
@@ -650,6 +712,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
     rule_true_model_conflict_summary_df = build_rule_true_model_conflict_summary(df)
     task2_clinical_df = build_task2_clinical_subgroups(df)
     task2_confusion_df = build_task2_confusion_focus(df)
+    decision_safety_df = build_decision_safety_summary(df)
     error_df = df.loc[~df["correct"]].copy()
     error_df = error_df.sort_values(["task", "label_col", "confidence"], ascending=[True, True, False])
 
@@ -664,6 +727,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
     rule_true_model_conflict_summary_df.to_csv(files["three_way_conflict_summary"], index=False, encoding="utf-8-sig")
     task2_clinical_df.to_csv(files["task2_clinical_subgroups"], index=False, encoding="utf-8-sig")
     task2_confusion_df.to_csv(files["task2_confusion_focus"], index=False, encoding="utf-8-sig")
+    decision_safety_df.to_csv(files["decision_safety_summary"], index=False, encoding="utf-8-sig")
 
     manifest = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -678,6 +742,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
         "n_three_way_conflict_summary_rows": int(len(rule_true_model_conflict_summary_df)),
         "n_task2_clinical_subgroup_rows": int(len(task2_clinical_df)),
         "n_task2_confusion_focus_rows": int(len(task2_confusion_df)),
+        "n_decision_safety_summary_rows": int(len(decision_safety_df)),
         "files": {key: str(path) for key, path in files.items()},
     }
     files["manifest"].write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")

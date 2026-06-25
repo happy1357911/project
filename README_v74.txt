@@ -1,4 +1,86 @@
+<!-- 2026-06-25-p0-p4-gpt-analysis-update -->
+
+## 2026-06-25 P0-P4 GPT Analysis Response Update
+
+This update was implemented after checking the current codebase against the latest GPT all.zip analysis and professor feedback. The goal is to move the project from a model-score-only framing toward a missing-aware, clinical-rule-guided, locked-test-traceable decision-support pipeline.
+
+Completed updates:
+- `sync_all_outputs_v74.py` now declares package type: `analysis_only`, `execution_ready`, or `custom`.
+- The sync manifest explicitly records whether raw data, checkpoints, and large row-level prediction files are included.
+- `run_all_v74.py` passes package flags to sync and verifies that `sync_manifest_v74.json` matches the run arguments.
+- `run_locked_test_v74.py` now produces locked-test error analysis, three-way conflict tables, calibration summary, ECE bins, Brier score, and confidence-threshold curves.
+- `run_all_v74.py` now creates `results_v74/calibration_analysis_locked_test/` and runs error analysis with `--mode all`.
+- Hybrid outputs now include `hybrid_decision_reason`, `hybrid_warning_reasons`, and decision-reason summary CSVs.
+- Artificial missingness now applies conservative scenario-level model fallback for incomplete or corrupted stress scenarios.
+- Task2 artificial ABG borderline stress now uses 10 dB instead of 15 dB, so it is truly borderline rather than clear ABG.
+- Error analysis now outputs `decision_safety_summary.csv`.
+- Dashboard now displays model confidence, hybrid decision reason, and low-confidence abstention.
+- `evaluate_v74.py` now outputs `statistical_summary_all_configs.csv` with mean, std, SEM, and clipped 95 percent CI.
+
+Recommended formal refresh command:
+
+```powershell
+python run_all_v74.py --skip-model-profile --run-locked-test --locked-allow-overwrite --package-type analysis_only
+```
+
+Use this only when a re-runnable large package is required:
+
+```powershell
+python run_all_v74.py --skip-model-profile --run-locked-test --locked-allow-overwrite --package-type execution_ready
+```
+
+<!-- /2026-06-25-p0-p4-gpt-analysis-update -->
+
+### Added Main Outputs
+- `paper_v74/tables/statistical_summary_all_configs.csv`
+- `results_v74/calibration_analysis_locked_test/`
+- `paper_v74/hybrid_evaluation/hybrid_decision_reason_summary*.csv`
+- `paper_v74/error_analysis/decision_safety_summary.csv`
+
+
 MetaIRL Hearing AI v7.4
+
+<!-- 2026-06-25-rule-source-update -->
+
+## 2026-06-25 Rule and Data Source Update
+
+Task2/Task3 pipeline source is now `task2_3_pure_data(6_24).xlsx`. This is the corrected 6/24 file and is used by preprocessing, training, ML baselines, rule baselines, split protocol, artificial missingness, feature importance, hybrid evaluation inputs, and dashboard/model-row logic through the shared preprocessing path.
+
+Rule updates:
+- `xxNR` is treated as measured-but-censored evidence, replaced by the frequency-specific equipment upper limit, and counted as complete for rule completeness. A pure `NR` token is not treated as a valid numeric NR value.
+- Task2 model input now includes AC 500/1000/2000/4000/6000/8000 Hz plus AC NR flags for all six frequencies. ABG remains 500/1000/2000/4000 Hz.
+- Task2 rule uses `abs(AC-BC) > 10 dB` for ABG, checks AC abnormality across 500/1000/2000/4000/6000/8000 Hz, and treats 6000/8000 as complete when at least one is present.
+- Task2 8-10 dB ABG is a borderline warning only; it does not trigger CHL/MHL unless another frequency has clear ABG.
+- Task3 rule is peak-based: `peak_daPa > -150 => A`, `-300 < peak_daPa <= -150 => C` with confidence 0.6, and `peak_daPa <= -300 => B`. NP peak/compliance evidence remains Type B.
+- Hybrid rule-first now uses the rule only when `complete_for_rule=True`, `baseline_covered=True`, and rule confidence reaches the configured threshold; otherwise it uses the model.
+
+Smoke checks after this update:
+- `python run_all_v74.py --compile-only` passed for all root Python files.
+- `python run_all_v74.py --dry-run --skip-model-profile --run-locked-test --locked-allow-overwrite` showed the full pipeline order.
+- `baseline_rules_v74.py` on the corrected source produced Task2 n=382 and Task3 n=270.
+
+<!-- /2026-06-25-rule-source-update -->
+
+<!-- 2026-06-25-external-run-configs -->
+
+## 2026-06-25 External Run Config Update
+
+Training parameter combinations are now externalized into `configs/run_configs_v74.json`.
+
+The JSON file contains:
+- `model_size_configs`: base / small / tiny model dimensions.
+- `missing_aug_profiles`: missingness augmentation probabilities and Task1/Task2/Task3 strategy weights.
+- `run_configs`: the 15 recommended masked configurations.
+- `ablation_run_configs`: the 5 ablation configurations.
+
+Default usage:
+```powershell
+python run_all_v74.py --run-config-file configs/run_configs_v74.json --skip-model-profile --run-locked-test --locked-allow-overwrite
+```
+
+`train_v74.py`, `run_all_v74.py`, and `run_locked_test_v74.py` all support the external config file. `sync_all_outputs_v74.py` also copies `configs/run_configs_v74.json` into `all/`.
+
+<!-- /2026-06-25-external-run-configs -->
 
 <!-- 2026-06-20-edge-profile-deferred -->
 
@@ -62,7 +144,7 @@ Key expected outputs include `main_hybrid_summary.csv`, `main_hybrid_summary_loc
 ============================================================
 
 - task1_all_three_common14_v1.csv
-- task2_3_pure_data.csv (Task2/Task3 shared source; extension is .csv but content may be Excel/OpenXML)
+- task2_3_pure_data(6_24).xlsx (Task2/Task3 corrected 6/24 shared source)
 
 目前三個任務都轉為 ear-level sample：
 - Task1：左右耳拆開，以單耳 AC/PTA 判斷聽損程度。
@@ -71,7 +153,7 @@ Key expected outputs include `main_hybrid_summary.csv`, `main_hybrid_summary_loc
 
 目前 union_features = 49：
 - Task1 features = 5
-- Task2 features = 32
+- Task2 features = 36
 - Task3 features = 16
 
 ============================================================
@@ -174,7 +256,7 @@ Paper export：
 ============================================================
 
 2026-06-21 data-source update:
-- Task2 and Task3 now use `task2_3_pure_data.csv` as the shared raw source.
+- Task2 and Task3 now use `task2_3_pure_data(6_24).xlsx` as the shared corrected raw source.
 - The file extension is `.csv`, but the current file content is Excel/OpenXML; `preprocessing_v74.load_tabular_data()` handles both normal CSV and this xlsx-in-csv case.
 - New Task2 standard ear-level rows = 384; rule/label mismatch = 27. Main mismatch contexts are `abg_borderline`, `no_bc_data`, `bc_missing`, `ac_missing`, and `nr_or_censored`.
 - New Task3 valid A/B/C ear-level rows = 271; many rows have `missing_tymp_data`, so rule coverage and covered-only performance must be interpreted separately.

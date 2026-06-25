@@ -33,8 +33,8 @@ from preprocessing_v74 import (
 
 
 TASK1_CSV = "task1_all_three_common14_v1.csv"
-TASK2_CSV = "task2_3_pure_data.csv"
-TASK3_CSV = "task2_3_pure_data.csv"
+TASK2_CSV = "task2_3_pure_data(6_24).xlsx"
+TASK3_CSV = "task2_3_pure_data(6_24).xlsx"
 INSUFFICIENT_EVIDENCE_LABEL = "INSUFFICIENT_EVIDENCE"
 
 

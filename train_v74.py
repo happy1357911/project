@@ -285,6 +285,174 @@ ABLATION_RUN_CONFIGS = [
     ),
 ]
 
+DEFAULT_RUN_CONFIG_FILE = Path("configs/run_configs_v74.json")
+CONFIG_PRESET_TO_SPEC_KEY = {
+    "recommended": "run_configs",
+    "ablation": "ablation_run_configs",
+}
+CONFIG_ENTRY_KEYS = {"name", "model_size", "missing_profile", "reward_weight"}
+
+
+def resolve_run_config_file(path_value: str) -> Path:
+    path = Path(path_value or DEFAULT_RUN_CONFIG_FILE)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    return path.resolve()
+
+
+def load_run_config_spec(path_value: str) -> dict:
+    config_path = resolve_run_config_file(path_value)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Run config file not found: {config_path}. "
+            "Expected JSON such as configs/run_configs_v74.json."
+        )
+    with config_path.open("r", encoding="utf-8") as fh:
+        spec = json.load(fh)
+    if not isinstance(spec, dict):
+        raise ValueError(f"Run config file must contain a JSON object: {config_path}")
+    if str(spec.get("schema_version")) != "v1":
+        raise ValueError(f"Unsupported run config schema_version in {config_path}: {spec.get('schema_version')}")
+    spec["_config_path"] = str(config_path)
+    return spec
+
+
+def _require_mapping(spec: dict, key: str) -> dict:
+    value = spec.get(key)
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"Run config JSON key '{key}' must be a non-empty object.")
+    return value
+
+
+def _require_list(spec: dict, key: str, expected_len: int) -> list:
+    value = spec.get(key)
+    if not isinstance(value, list):
+        raise ValueError(f"Run config JSON key '{key}' must be a list.")
+    if len(value) != expected_len:
+        raise ValueError(f"Run config JSON key '{key}' must contain {expected_len} entries, got {len(value)}.")
+    return value
+
+
+def _validate_model_size_configs(model_size_configs: dict) -> None:
+    required = {"d_model", "nhead", "num_layers", "dropout", "proto_alpha", "proto_temperature"}
+    for name, cfg in model_size_configs.items():
+        if not isinstance(cfg, dict):
+            raise ValueError(f"model_size_configs.{name} must be an object.")
+        missing = sorted(required - set(cfg))
+        if missing:
+            raise ValueError(f"model_size_configs.{name} missing fields: {missing}")
+        d_model = int(cfg["d_model"])
+        nhead = int(cfg["nhead"])
+        if nhead <= 0 or d_model % nhead != 0:
+            raise ValueError(f"model_size_configs.{name} has invalid d_model/nhead: {d_model}/{nhead}")
+
+
+def _validate_missing_aug_profiles(missing_aug_profiles: dict) -> None:
+    for name, profile in missing_aug_profiles.items():
+        if not isinstance(profile, dict):
+            raise ValueError(f"missing_aug_profiles.{name} must be an object.")
+        p = float(profile.get("missing_aug_p", -1.0))
+        if p <= 0.0:
+            raise ValueError(f"missing_aug_profiles.{name}.missing_aug_p must be > 0, got {p}")
+        weights = profile.get("missing_aug_strategy_weights")
+        if not isinstance(weights, dict):
+            raise ValueError(f"missing_aug_profiles.{name}.missing_aug_strategy_weights must be an object.")
+        for task_name in ("Task1", "Task2", "Task3"):
+            task_weights = weights.get(task_name)
+            if not isinstance(task_weights, dict) or not task_weights:
+                raise ValueError(f"missing_aug_profiles.{name} missing weights for {task_name}.")
+            values = [float(v) for v in task_weights.values()]
+            if any(v < 0.0 for v in values) or sum(values) <= 0.0:
+                raise ValueError(f"missing_aug_profiles.{name}.{task_name} weights must be non-negative and sum > 0.")
+
+
+def _default_run_values(spec: dict) -> dict:
+    defaults = {
+        "lr": 5e-4,
+        "batch": 512,
+        "epochs": 80,
+        "patience": 15,
+        "weight_decay": 1e-4,
+        "task_sampling_mode": "round_robin_k1",
+        "steps_per_task": None,
+        "support_per_class": 1,
+        "validate_with_meta_support": True,
+    }
+    configured = spec.get("default_run_values", {})
+    if configured is not None:
+        if not isinstance(configured, dict):
+            raise ValueError("Run config JSON key 'default_run_values' must be an object when provided.")
+        defaults.update(copy.deepcopy(configured))
+    return defaults
+
+
+def build_run_config_from_spec_entry(
+    entry: dict,
+    model_size_configs: dict,
+    missing_aug_profiles: dict,
+    default_values: dict,
+) -> dict:
+    if not isinstance(entry, dict):
+        raise ValueError("Each run config entry must be an object.")
+    missing = sorted(CONFIG_ENTRY_KEYS - set(entry))
+    if missing:
+        raise ValueError(f"Run config entry missing fields {missing}: {entry}")
+
+    model_size = str(entry["model_size"])
+    missing_profile = str(entry["missing_profile"])
+    if model_size not in model_size_configs:
+        raise ValueError(f"Unknown model_size '{model_size}' in run config '{entry.get('name')}'.")
+    if missing_profile not in missing_aug_profiles:
+        raise ValueError(f"Unknown missing_profile '{missing_profile}' in run config '{entry.get('name')}'.")
+
+    cfg = copy.deepcopy(default_values)
+    cfg.update(copy.deepcopy(model_size_configs[model_size]))
+    profile = copy.deepcopy(missing_aug_profiles[missing_profile])
+    profile["missing_aug_profile"] = missing_profile
+    cfg.update(profile)
+    cfg.update({
+        "name": str(entry["name"]),
+        "model_size": model_size,
+        "missing_profile": missing_profile,
+        "reward_weight": float(entry["reward_weight"]),
+    })
+    for key, value in entry.items():
+        if key not in CONFIG_ENTRY_KEYS:
+            cfg[key] = copy.deepcopy(value)
+
+    d_model = int(cfg.get("d_model", DEFAULT_MODEL_CONFIG["d_model"]))
+    nhead = int(cfg.get("nhead", DEFAULT_MODEL_CONFIG["nhead"]))
+    if nhead <= 0 or d_model % nhead != 0:
+        raise ValueError(f"Run config '{cfg['name']}' has invalid d_model/nhead: {d_model}/{nhead}")
+    if float(cfg.get("missing_aug_p", 0.0) or 0.0) <= 0.0:
+        raise ValueError(f"Run config '{cfg['name']}' must use missing_aug_p > 0.")
+    return cfg
+
+
+def load_run_config_sets(config_path: str) -> tuple[dict, str]:
+    spec = load_run_config_spec(config_path)
+    model_size_configs = _require_mapping(spec, "model_size_configs")
+    missing_aug_profiles = _require_mapping(spec, "missing_aug_profiles")
+    _validate_model_size_configs(model_size_configs)
+    _validate_missing_aug_profiles(missing_aug_profiles)
+    default_values = _default_run_values(spec)
+
+    selected = {}
+    for preset, key in CONFIG_PRESET_TO_SPEC_KEY.items():
+        expected_len = 15 if preset == "recommended" else 5
+        selected[preset] = [
+            build_run_config_from_spec_entry(entry, model_size_configs, missing_aug_profiles, default_values)
+            for entry in _require_list(spec, key, expected_len)
+        ]
+    selected["all"] = [*selected["recommended"], *selected["ablation"]]
+
+    names = [cfg["name"] for configs in (selected["recommended"], selected["ablation"]) for cfg in configs]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"Run config names must be unique. Duplicates: {duplicates}")
+    return selected, str(spec["_config_path"])
+
+
 TASK1_EAR_LEVEL_FEATURES = [
     "ac_500Hz",
     "ac_1000Hz",
@@ -298,10 +466,14 @@ TASK2_EAR_LEVEL_FEATURES = [
     "ac_1000Hz",
     "ac_2000Hz",
     "ac_4000Hz",
+    "ac_6000Hz",
+    "ac_8000Hz",
     "ac_500Hz_nr",
     "ac_1000Hz_nr",
     "ac_2000Hz_nr",
     "ac_4000Hz_nr",
+    "ac_6000Hz_nr",
+    "ac_8000Hz_nr",
     "bc_500Hz",
     "bc_1000Hz",
     "bc_2000Hz",
@@ -380,14 +552,14 @@ TASK_INFO = {
         "feature_cols": TASK1_EAR_LEVEL_FEATURES,
     },
     "Task2": {
-        "csv": "task2_3_pure_data.csv",
+        "csv": "task2_3_pure_data(6_24).xlsx",
         "label_cols": [
             "hearing_type",
         ],
         "feature_cols": TASK2_EAR_LEVEL_FEATURES,
     },
     "Task3": {
-        "csv": "task2_3_pure_data.csv",
+        "csv": "task2_3_pure_data(6_24).xlsx",
         "label_cols": [
             "tymp_type",
         ],
@@ -496,27 +668,32 @@ def hz_from_col(col: str):
 
 
 def parse_numeric_value(value, hz=None, nr_limits: Dict[int, float] = None):
-    """共用數值解析：一般數值轉 float；含 NR 時依指定規則轉換。
-
-    回傳 None 代表原始資料缺失或不可轉換。若 nr_limits 有提供，
-    含 NR 的 AC 會轉成該頻率上限；若未提供，則保留 NR 前面的數字。
-    """
     if value is None:
         return None
-    raw = str(value).strip()
-    if raw == "" or raw.lower() in {"nan", "none", "null"}:
-        return None
-    if "NR" in raw.upper():
-        if hz is not None and nr_limits and hz in nr_limits:
-            return float(nr_limits[hz])
-        m = re.search(r"-?\d+(?:\.\d+)?", raw)
-        return float(m.group(0)) if m else None
     try:
-        x = float(raw)
-        return x if np.isfinite(x) else None
-    except Exception:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    raw = str(value).strip()
+    if raw in MISSING_TOKENS or raw.lower() in {str(token).lower() for token in MISSING_TOKENS}:
         return None
-
+    upper = raw.upper().replace(" ", "")
+    is_nr = upper.endswith("NR")
+    cleaned = upper[:-2] if is_nr else upper
+    cleaned = cleaned.replace("DB", "")
+    match = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+    if not match:
+        return None
+    try:
+        numeric = float(match.group(0))
+    except ValueError:
+        return None
+    if not np.isfinite(numeric):
+        return None
+    if is_nr and hz is not None and nr_limits and hz in nr_limits:
+        return float(nr_limits[hz])
+    return numeric
 
 def clean_value(v, hz=None, nr_limits: Dict[int, float] = None):
     """安全轉 float；缺失、NaN、inf、不可轉換時統一補 0.0。"""
@@ -541,8 +718,9 @@ def is_nr_value(value) -> bool:
             return False
     except TypeError:
         pass
-    return "NR" in str(value).strip().upper()
-
+    upper = str(value).strip().upper().replace(" ", "")
+    upper = upper.replace("DB", "")
+    return re.fullmatch(r"-?\d+(?:\.\d+)?NR", upper) is not None
 
 def nr_indicator_series(df: pd.DataFrame, col: str) -> pd.Series:
     if col not in df.columns:
@@ -1208,7 +1386,7 @@ def apply_training_missingness_augmentation(
 
         nr_mask = masks["multi_ac_nr"]
         if bool(nr_mask.any().item()):
-            for hz in (2000, 4000):
+            for hz in (2000, 4000, 6000, 8000):
                 set_augmented_feature(
                     out,
                     nr_mask,
@@ -1218,8 +1396,9 @@ def apply_training_missingness_augmentation(
                     TASK2_AC_NR_LIMITS_DB.get(hz, 120.0),
                 )
                 set_augmented_feature(out, nr_mask, feature_to_idx, norm_for_task, f"ac_{hz}Hz_nr", 1.0)
-                set_augmented_feature(out, nr_mask, feature_to_idx, norm_for_task, f"abg_{hz}Hz_censored", 1.0)
-                set_augmented_feature(out, nr_mask, feature_to_idx, norm_for_task, f"abg_{hz}Hz_missing", 0.0)
+                if hz in TASK2_ABG_FREQS:
+                    set_augmented_feature(out, nr_mask, feature_to_idx, norm_for_task, f"abg_{hz}Hz_censored", 1.0)
+                    set_augmented_feature(out, nr_mask, feature_to_idx, norm_for_task, f"abg_{hz}Hz_missing", 0.0)
 
     if task_name == "Task3":
         strategy_names = ["no_peak", "no_width", "np_like", "no_tymp"]
@@ -2539,7 +2718,14 @@ def parse_args():
         type=str,
         default="recommended",
         choices=["recommended", "ablation", "all"],
-        help="recommended = 15 masked RUN_CONFIGS; ablation = 5 masked ablations; all = both (20 configs).",
+        help="recommended = 15 masked run_configs; ablation = 5 masked ablation_run_configs; all = both (20 configs).",
+    )
+    p.add_argument(
+        "--run_config_file",
+        "--run-config-file",
+        type=str,
+        default=str(DEFAULT_RUN_CONFIG_FILE),
+        help="External JSON file defining model sizes, missingness profiles, RUN_CONFIGS, and ABLATION_RUN_CONFIGS.",
     )
     p.add_argument(
         "--split_manifest",
@@ -2579,14 +2765,14 @@ def main():
         experiments = [x.strip() for x in args.experiments.split(",") if x.strip()]
     experiments = expand_experiment_names(experiments, args.single_task_target)
 
-    if args.config_preset == "recommended":
-        selected_config_source = RUN_CONFIGS
-    elif args.config_preset == "ablation":
-        selected_config_source = ABLATION_RUN_CONFIGS
-    elif args.config_preset == "all":
-        selected_config_source = [*RUN_CONFIGS, *ABLATION_RUN_CONFIGS]
-    else:
+    config_sets, loaded_config_path = load_run_config_sets(args.run_config_file)
+    if args.config_preset not in config_sets:
         raise ValueError(f"Unknown config_preset: {args.config_preset}")
+    selected_config_source = config_sets[args.config_preset]
+    print(
+        f"[MetaIRL v7.4] Loaded run configs from {loaded_config_path} "
+        f"preset={args.config_preset} n={len(selected_config_source)}"
+    )
 
     run_configs = []
     for cfg in selected_config_source:

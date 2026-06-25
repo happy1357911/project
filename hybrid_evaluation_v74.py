@@ -15,6 +15,7 @@ DERIVED_RULE_COLUMNS = [
     "rule_decision_label",
     "abstain_pred_label",
     "baseline_covered",
+    "complete_for_rule",
     "evidence_status",
     "rule_confidence",
     "warning_reasons",
@@ -28,6 +29,8 @@ DERIVED_HYBRID_COLUMNS = [
     "hybrid_confidence_gate_used_model",
     "hybrid_low_confidence_abstain",
     "hybrid_model_confidence",
+    "hybrid_decision_reason",
+    "hybrid_warning_reasons",
 ]
 
 
@@ -63,6 +66,7 @@ def load_rule_predictions(path: Path) -> pd.DataFrame:
         "rule_decision_label",
         "abstain_pred_label",
         "baseline_covered",
+        "complete_for_rule",
         "evidence_status",
         "rule_confidence",
         "warning_reasons",
@@ -96,6 +100,13 @@ def merge_model_rule_predictions(model_df: pd.DataFrame, rule_df: pd.DataFrame) 
         suffixes=("", "_rule"),
     )
     merged["baseline_covered"] = merged["baseline_covered"].astype(str).str.lower().isin({"true", "1", "yes"})
+    if "complete_for_rule" not in merged.columns:
+        merged["complete_for_rule"] = merged["baseline_covered"]
+    else:
+        complete_raw = merged["complete_for_rule"]
+        complete_mask = complete_raw.astype(str).str.lower().isin({"true", "1", "yes"})
+        complete_mask = complete_mask.mask(complete_raw.isna(), merged["baseline_covered"])
+        merged["complete_for_rule"] = complete_mask.astype(bool)
     merged["rule_confidence"] = pd.to_numeric(merged["rule_confidence"], errors="coerce").fillna(0.0)
     merged["forced_pred_label"] = merged["forced_pred_label"].fillna(INSUFFICIENT_EVIDENCE_LABEL).astype(str)
     if "rule_decision_label" not in merged.columns:
@@ -119,7 +130,11 @@ def add_hybrid_predictions(
     model_confidence_threshold: float = 0.6,
 ) -> pd.DataFrame:
     out = df.copy()
-    use_rule = out["baseline_covered"] & out["rule_confidence"].ge(rule_confidence_threshold)
+    use_rule = (
+        out["complete_for_rule"]
+        & out["baseline_covered"]
+        & out["rule_confidence"].ge(rule_confidence_threshold)
+    )
     out["hybrid_pred_label"] = out["pred_label"]
     out.loc[use_rule, "hybrid_pred_label"] = out.loc[use_rule, "rule_decision_label"]
     out["hybrid_used_rule"] = use_rule
@@ -134,6 +149,21 @@ def add_hybrid_predictions(
     out["hybrid_low_confidence_abstain"] = low_confidence
     out["hybrid_confidence_gate_used_model"] = (~use_rule) & (~low_confidence)
     out["hybrid_model_confidence"] = confidence.astype(float)
+
+    reason = pd.Series("model_fallback", index=out.index, dtype=object)
+    reason = reason.mask(use_rule, "rule_complete_high_confidence")
+    reason = reason.mask((~use_rule) & (~out["complete_for_rule"]), "model_fallback_incomplete_rule_data")
+    reason = reason.mask((~use_rule) & out["complete_for_rule"] & (~out["baseline_covered"]), "model_fallback_rule_abstained")
+    reason = reason.mask((~use_rule) & out["baseline_covered"] & out["rule_confidence"].lt(rule_confidence_threshold), "model_fallback_low_rule_confidence")
+    reason = reason.mask(low_confidence, "abstain_low_model_confidence")
+    out["hybrid_decision_reason"] = reason
+
+    warning_base = out.get("warning_reasons", pd.Series("", index=out.index)).fillna("").astype(str)
+    out["hybrid_warning_reasons"] = warning_base
+    out.loc[low_confidence, "hybrid_warning_reasons"] = (
+        out.loc[low_confidence, "hybrid_warning_reasons"].str.strip(";")
+        + ";low_model_confidence"
+    ).str.strip(";")
     return out
 
 
@@ -276,6 +306,31 @@ def build_main_hybrid_summary(summary: pd.DataFrame, merged: pd.DataFrame) -> pd
     return pivot[output_cols]
 
 
+def build_decision_reason_summary(merged: pd.DataFrame) -> pd.DataFrame:
+    if merged.empty or "hybrid_decision_reason" not in merged.columns:
+        return pd.DataFrame()
+    group_cols = [
+        col
+        for col in ["config_name", "exp_name", "seed", "prediction_file", "evaluation_mode", "task", "label_col", "hybrid_decision_reason"]
+        if col in merged.columns
+    ]
+    summary = (
+        merged.groupby(group_cols, dropna=False)
+        .agg(
+            n=("hybrid_decision_reason", "size"),
+            mean_model_confidence=("hybrid_model_confidence", "mean"),
+            rule_rate=("hybrid_confidence_gate_used_rule", "mean"),
+            model_rate=("hybrid_confidence_gate_used_model", "mean"),
+            abstain_rate=("hybrid_low_confidence_abstain", "mean"),
+        )
+        .reset_index()
+    )
+    total_cols = [col for col in group_cols if col != "hybrid_decision_reason"]
+    totals = summary.groupby(total_cols, dropna=False)["n"].transform("sum") if total_cols else summary["n"].sum()
+    summary["reason_fraction"] = summary["n"] / totals
+    return summary.sort_values(total_cols + ["n"], ascending=[True] * len(total_cols) + [False]).reset_index(drop=True)
+
+
 def run(args):
     if args.model_predictions_file:
         model_df = load_model_prediction_file(Path(args.model_predictions_file))
@@ -292,6 +347,7 @@ def run(args):
     )
     summary = summarize(merged)
     main_summary = build_main_hybrid_summary(summary, merged)
+    reason_summary = build_decision_reason_summary(merged)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -300,12 +356,16 @@ def run(args):
     locked_mode = args.mode == "locked_test"
     pred_path = out_dir / ("hybrid_predictions_locked_test.csv" if locked_mode else "hybrid_predictions.csv")
     summary_path = out_dir / ("hybrid_locked_test_summary.csv" if locked_mode else "hybrid_summary.csv")
+    reason_summary_path = out_dir / (
+        "hybrid_decision_reason_summary_locked_test.csv" if locked_mode else "hybrid_decision_reason_summary.csv"
+    )
     main_summary_path = paper_tables_dir / (
         "main_hybrid_summary_locked_test.csv" if locked_mode else "main_hybrid_summary.csv"
     )
     manifest_path = out_dir / "hybrid_manifest.json"
     merged.to_csv(pred_path, index=False, encoding="utf-8-sig")
     summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
+    reason_summary.to_csv(reason_summary_path, index=False, encoding="utf-8-sig")
     main_summary.to_csv(main_summary_path, index=False, encoding="utf-8-sig")
     manifest = {
         "results_dir": args.results_dir,
@@ -317,6 +377,7 @@ def run(args):
         "outputs": {
             "predictions": str(pred_path),
             "summary": str(summary_path),
+            "decision_reason_summary": str(reason_summary_path),
             "main_summary": str(main_summary_path),
             "locked_summary": str(summary_path) if locked_mode else None,
             "locked_main_summary": str(main_summary_path) if locked_mode else None,

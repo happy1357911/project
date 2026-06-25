@@ -1,5 +1,25 @@
 # 輸出檔案 Label 與欄位意義說明
 
+<!-- 2026-06-25-p0-p4-gpt-analysis-update -->
+
+## 2026-06-25 New Outputs and Field Meanings
+
+| Output / Field | Meaning |
+|---|---|
+| `sync_manifest_v74.json::package_type` | Package declaration: `analysis_only`, `execution_ready`, or `custom`. |
+| `include_raw_data` | Whether active raw input data files are included. |
+| `include_checkpoints` | Whether `.pth/.pt/.ckpt` checkpoints are included. |
+| `include_large_prediction_rows` | Whether large row-level prediction CSV files are included. |
+| `hybrid_decision_reason` | Why hybrid used rule, model fallback, or abstention. |
+| `hybrid_warning_reasons` | Rule/model/hybrid warning reasons. |
+| `hybrid_decision_reason_summary*.csv` | Reason distribution per config/experiment/seed/task. |
+| `decision_safety_summary.csv` | Low confidence, rule abstain, incomplete rule data, conflict, missing/NR/NP rates. |
+| `calibration_analysis_locked_test/` | Locked-test ECE, Brier score, and confidence-threshold curves. |
+| `statistical_summary_all_configs.csv` | Repeated-seed mean/std/SEM/95 percent CI. |
+
+<!-- /2026-06-25-p0-p4-gpt-analysis-update -->
+
+
 <!-- 2026-06-20-edge-profile-deferred -->
 
 ## 2026-06-20 決策：暫不執行 edge 端估計

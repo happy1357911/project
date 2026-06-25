@@ -1,5 +1,20 @@
 # GPT Suggestions Action Plan v7.4
 
+<!-- 2026-06-25-p0-p4-gpt-analysis-update -->
+
+## 2026-06-25 P0-P4 Implementation Status
+
+| Priority | Status | Completed Work |
+|---|---|---|
+| P0 | Done | Package type, manifest flags, obsolete sync dirs, run_all manifest verification. |
+| P1 | Done | Locked-test error analysis, locked-test calibration, confidence threshold propagation, conservative artificial-missingness fallback. |
+| P2 | Done | Hybrid decision reason, decision safety summary, dashboard model confidence and low-confidence abstain. |
+| P3 | Done | Statistical summary with mean/std/SEM/95 percent CI; feature importance and ablation remain in run_all. |
+| P4 | Done | Documentation, conversation log, modification history, sync behavior, and final checks updated. |
+
+<!-- /2026-06-25-p0-p4-gpt-analysis-update -->
+
+
 ?????? GPT/?????????????????????????
 
 ## P0 ???

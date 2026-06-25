@@ -25,8 +25,11 @@ FEATURE_GROUPS = {
         "all_ac_evidence": ["ac_500Hz", "ac_1000Hz", "ac_2000Hz", "ac_4000Hz", "ac_PTA"],
     },
     "Task2": {
-        "ac_thresholds": ["ac_500Hz", "ac_1000Hz", "ac_2000Hz", "ac_4000Hz"],
-        "ac_nr_flags": ["ac_500Hz_nr", "ac_1000Hz_nr", "ac_2000Hz_nr", "ac_4000Hz_nr"],
+        "ac_thresholds": ["ac_500Hz", "ac_1000Hz", "ac_2000Hz", "ac_4000Hz", "ac_6000Hz", "ac_8000Hz"],
+        "ac_core_thresholds": ["ac_500Hz", "ac_1000Hz", "ac_2000Hz", "ac_4000Hz"],
+        "ac_high_frequency_thresholds": ["ac_6000Hz", "ac_8000Hz"],
+        "ac_nr_flags": ["ac_500Hz_nr", "ac_1000Hz_nr", "ac_2000Hz_nr", "ac_4000Hz_nr", "ac_6000Hz_nr", "ac_8000Hz_nr"],
+        "ac_high_frequency_nr_flags": ["ac_6000Hz_nr", "ac_8000Hz_nr"],
         "bc_thresholds": ["bc_500Hz", "bc_1000Hz", "bc_2000Hz", "bc_4000Hz"],
         "bc_nr_flags": ["bc_500Hz_nr", "bc_1000Hz_nr", "bc_2000Hz_nr", "bc_4000Hz_nr"],
         "bc_missing_flags": ["bc_500Hz_missing", "bc_1000Hz_missing", "bc_2000Hz_missing", "bc_4000Hz_missing"],
@@ -37,6 +40,10 @@ FEATURE_GROUPS = {
             "bc_500Hz", "bc_1000Hz", "bc_2000Hz", "bc_4000Hz",
             "bc_500Hz_nr", "bc_1000Hz_nr", "bc_2000Hz_nr", "bc_4000Hz_nr",
             "bc_500Hz_missing", "bc_1000Hz_missing", "bc_2000Hz_missing", "bc_4000Hz_missing",
+        ],
+        "all_ac_evidence": [
+            "ac_500Hz", "ac_1000Hz", "ac_2000Hz", "ac_4000Hz", "ac_6000Hz", "ac_8000Hz",
+            "ac_500Hz_nr", "ac_1000Hz_nr", "ac_2000Hz_nr", "ac_4000Hz_nr", "ac_6000Hz_nr", "ac_8000Hz_nr",
         ],
         "all_abg_evidence": [
             "abg_500Hz", "abg_1000Hz", "abg_2000Hz", "abg_4000Hz",

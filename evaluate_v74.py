@@ -589,6 +589,60 @@ def export_one_result_dir(results_dir: Path, paper_dir: Path, heatmap_mode: str 
     }
 
 
+def build_statistical_summary(collected: dict[str, list[pd.DataFrame]]) -> pd.DataFrame:
+    source_map = {
+        "all_runs": "configured",
+        "all_runs_no_support": "no_support",
+        "all_runs_locked_test_no_support": "locked_test_no_support",
+    }
+    metric_cols = ["accuracy", "macro_f1", "balanced_accuracy"]
+    rows = []
+    for source_key, evaluation_scope in source_map.items():
+        frames = collected.get(source_key) or []
+        if not frames:
+            continue
+        df = pd.concat(frames, ignore_index=True)
+        group_cols = [
+            col for col in ["config_name", "exp_name", "task", "label_col"]
+            if col in df.columns
+        ]
+        if not group_cols:
+            continue
+        for key, sub in df.groupby(group_cols, dropna=False):
+            key_tuple = key if isinstance(key, tuple) else (key,)
+            base = dict(zip(group_cols, key_tuple))
+            for metric in metric_cols:
+                if metric not in sub.columns:
+                    continue
+                values = pd.to_numeric(sub[metric], errors="coerce").dropna()
+                if values.empty:
+                    continue
+                n = int(len(values))
+                std = float(values.std(ddof=1)) if n > 1 else 0.0
+                sem = float(std / np.sqrt(n)) if n > 0 else np.nan
+                ci95_half_width = float(1.96 * sem) if np.isfinite(sem) else np.nan
+                mean_value = float(values.mean())
+                ci_low = mean_value - ci95_half_width if np.isfinite(ci95_half_width) else np.nan
+                ci_high = mean_value + ci95_half_width if np.isfinite(ci95_half_width) else np.nan
+                rows.append({
+                    **base,
+                    "evaluation_scope": evaluation_scope,
+                    "metric": metric,
+                    "n": n,
+                    "mean": mean_value,
+                    "std": std,
+                    "sem": sem,
+                    "ci95_low": float(np.clip(ci_low, 0.0, 1.0)) if np.isfinite(ci_low) else np.nan,
+                    "ci95_high": float(np.clip(ci_high, 0.0, 1.0)) if np.isfinite(ci_high) else np.nan,
+                    "ci95_half_width": ci95_half_width,
+                })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    sort_cols = [col for col in ["evaluation_scope", "config_name", "exp_name", "task", "label_col", "metric"] if col in out.columns]
+    return out.sort_values(sort_cols).reset_index(drop=True)
+
+
 def export_multi_result_dir(results_dir: Path, paper_dir: Path, heatmap_mode: str):
     runs_root = results_dir / "five_runs"
     if not runs_root.exists():
@@ -627,6 +681,14 @@ def export_multi_result_dir(results_dir: Path, paper_dir: Path, heatmap_mode: st
                 index=False,
                 encoding="utf-8-sig",
             )
+
+    statistical_summary = build_statistical_summary(collected)
+    if not statistical_summary.empty:
+        statistical_summary.to_csv(
+            root_tables / "statistical_summary_all_configs.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
 
     generated_prediction_heatmaps = export_confusion_matrices_from_prediction_rows(
         paper_dir / "error_analysis" / "prediction_rows_all.csv",

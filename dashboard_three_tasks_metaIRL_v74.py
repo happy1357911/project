@@ -38,6 +38,7 @@ st.set_page_config(page_title="Audiologist-Guided Hearing Decision Support v7.4"
 SUPPORTED_CC = {(5, 0), (6, 0), (6, 1), (7, 0), (7, 5), (8, 0), (8, 6), (9, 0), (8, 9)}
 DEFAULT_CHECKPOINT = DEFAULT_PRIMARY_CHECKPOINT
 DEFAULT_RULE_CONFIDENCE_THRESHOLD = 0.8
+DEFAULT_MODEL_CONFIDENCE_THRESHOLD = 0.6
 
 
 def safe_pick_device():
@@ -305,30 +306,54 @@ def predict_single(row_dict, task_name, side="right"):
         probs = torch.softmax(logits, dim=0).cpu().numpy()
         pred_idx = int(np.argmax(probs))
         pred_name = class_names[lbl][pred_idx]
+        model_confidence = float(probs[pred_idx])
         reward_pred = float(reward_dict[lbl][0].cpu().item())
         expert = expert_consistency_score(task_name, lbl, model_row, pred_name)
         warning = clinical_warning_summary(task_name, model_row, model_pred=pred_name)
         rule_label = warning.get("forced_rule_label")
         rule_confidence = float(warning.get("rule_confidence") or 0.0)
         baseline_covered = bool(warning.get("baseline_covered", False))
+        complete_for_rule = bool(warning.get("complete_for_rule", baseline_covered))
         hybrid_uses_rule = (
-            baseline_covered
+            complete_for_rule
+            and baseline_covered
             and rule_label not in {None, "", INSUFFICIENT_EVIDENCE_LABEL}
             and rule_confidence >= DEFAULT_RULE_CONFIDENCE_THRESHOLD
         )
-        hybrid_decision = rule_label if hybrid_uses_rule else pred_name
+        if hybrid_uses_rule:
+            hybrid_decision = rule_label
+            hybrid_source = "rule"
+            hybrid_decision_reason = "rule_complete_high_confidence"
+        elif model_confidence < DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
+            hybrid_decision = INSUFFICIENT_EVIDENCE_LABEL
+            hybrid_source = "abstain"
+            hybrid_decision_reason = "abstain_low_model_confidence"
+        else:
+            hybrid_decision = pred_name
+            hybrid_source = "model"
+            if not complete_for_rule:
+                hybrid_decision_reason = "model_fallback_incomplete_rule_data"
+            elif not baseline_covered:
+                hybrid_decision_reason = "model_fallback_rule_abstained"
+            elif rule_confidence < DEFAULT_RULE_CONFIDENCE_THRESHOLD:
+                hybrid_decision_reason = "model_fallback_low_rule_confidence"
+            else:
+                hybrid_decision_reason = "model_fallback"
         results[lbl] = {
             "model_prediction": pred_name,
             "pred": pred_name,
             "probs": probs,
+            "model_confidence": model_confidence,
             "reward_pred": reward_pred,
             "expert_consistency": expert,
             "rule_label": rule_label,
             "abstain_rule_label": warning.get("abstain_rule_label"),
             "hybrid_decision": hybrid_decision,
-            "hybrid_source": "rule" if hybrid_uses_rule else "model",
+            "hybrid_source": hybrid_source,
+            "hybrid_decision_reason": hybrid_decision_reason,
             "hybrid_uses_rule": hybrid_uses_rule,
             "baseline_covered": baseline_covered,
+            "complete_for_rule": complete_for_rule,
             "evidence_status": warning.get("evidence_status"),
             "rule_confidence": rule_confidence,
             "rule_model_conflict": warning.get("rule_model_conflict"),
@@ -354,9 +379,11 @@ def batch_predict(df, task_name):
                 row_out = {"index": idx, "ear_side": side}
                 for lbl, info in res.items():
                     row_out[f"{lbl}_model_prediction"] = info["model_prediction"]
+                    row_out[f"{lbl}_model_confidence"] = info["model_confidence"]
                     row_out[f"{lbl}_rule_prediction"] = info["rule_label"]
                     row_out[f"{lbl}_hybrid_decision"] = info["hybrid_decision"]
                     row_out[f"{lbl}_hybrid_source"] = info["hybrid_source"]
+                    row_out[f"{lbl}_hybrid_decision_reason"] = info["hybrid_decision_reason"]
                     row_out[f"{lbl}_pred"] = info["hybrid_decision"]
                     row_out[f"{lbl}_reward"] = info["reward_pred"]
                     row_out[f"{lbl}_expert_consistency"] = info["expert_consistency"]
@@ -417,9 +444,10 @@ for task_name, tab in zip(["Task1", "Task2", "Task3"], tabs):
             out = predict_single(vals, task_name, side=selected_side)
             for lbl, info in out.items():
                 st.markdown(f"### {lbl} ({selected_side})")
-                st.write(f"Model prediction: **{info['model_prediction']}**")
+                st.write(f"Model prediction: **{info['model_prediction']}** | confidence `{info['model_confidence']:.3f}`")
                 st.write(f"Rule prediction: **{info['rule_label']}**")
                 st.write(f"Hybrid decision: **{info['hybrid_decision']}** (`{info['hybrid_source']}`)")
+                st.write(f"Hybrid reason: `{info['hybrid_decision_reason']}`")
                 st.write(f"Reward head: `{info['reward_pred']:.3f}`")
                 st.write(f"Expert consistency: `{info['expert_consistency']:.3f}`")
                 st.write(f"Evidence: `{info['evidence_status']}` | Rule confidence: `{info['rule_confidence']:.3f}`")

@@ -1,0 +1,302 @@
+{
+  "schema_version": "v1",
+  "description": "External run configuration set for MetaIRL Hearing AI v7.4.",
+  "default_run_values": {
+    "lr": 0.0005,
+    "batch": 512,
+    "epochs": 80,
+    "patience": 15,
+    "weight_decay": 0.0001,
+    "task_sampling_mode": "round_robin_k1",
+    "steps_per_task": null,
+    "support_per_class": 1,
+    "validate_with_meta_support": true
+  },
+  "model_size_configs": {
+    "base": {
+      "d_model": 128,
+      "nhead": 8,
+      "num_layers": 4,
+      "dropout": 0.15,
+      "proto_alpha": 0.35,
+      "proto_temperature": 1.0
+    },
+    "small": {
+      "d_model": 64,
+      "nhead": 4,
+      "num_layers": 2,
+      "dropout": 0.15,
+      "proto_alpha": 0.25,
+      "proto_temperature": 1.5
+    },
+    "tiny": {
+      "d_model": 32,
+      "nhead": 4,
+      "num_layers": 1,
+      "dropout": 0.1,
+      "proto_alpha": 0.2,
+      "proto_temperature": 1.5
+    }
+  },
+  "missing_aug_profiles": {
+    "m05_balanced": {
+      "missing_aug_p": 0.05,
+      "missing_aug_strategy_weights": {
+        "Task1": {
+          "mask_pta": 0.35,
+          "mask_high_freq": 0.25,
+          "mask_low_freq": 0.2,
+          "mask_all_ac": 0.2
+        },
+        "Task2": {
+          "no_bc": 0.5,
+          "partial_bc": 0.3,
+          "multi_ac_nr": 0.2
+        },
+        "Task3": {
+          "no_peak": 0.2,
+          "no_width": 0.15,
+          "np_like": 0.25,
+          "no_tymp": 0.4
+        }
+      }
+    },
+    "m10_balanced": {
+      "missing_aug_p": 0.1,
+      "missing_aug_strategy_weights": {
+        "Task1": {
+          "mask_pta": 0.35,
+          "mask_high_freq": 0.25,
+          "mask_low_freq": 0.2,
+          "mask_all_ac": 0.2
+        },
+        "Task2": {
+          "no_bc": 0.5,
+          "partial_bc": 0.3,
+          "multi_ac_nr": 0.2
+        },
+        "Task3": {
+          "no_peak": 0.2,
+          "no_width": 0.15,
+          "np_like": 0.25,
+          "no_tymp": 0.4
+        }
+      }
+    },
+    "m15_bc_dominant": {
+      "missing_aug_p": 0.15,
+      "missing_aug_strategy_weights": {
+        "Task1": {
+          "mask_pta": 0.35,
+          "mask_high_freq": 0.25,
+          "mask_low_freq": 0.2,
+          "mask_all_ac": 0.2
+        },
+        "Task2": {
+          "no_bc": 0.65,
+          "partial_bc": 0.25,
+          "multi_ac_nr": 0.1
+        },
+        "Task3": {
+          "no_peak": 0.2,
+          "no_width": 0.15,
+          "np_like": 0.25,
+          "no_tymp": 0.4
+        }
+      }
+    },
+    "m15_tymp_dominant": {
+      "missing_aug_p": 0.15,
+      "missing_aug_strategy_weights": {
+        "Task1": {
+          "mask_pta": 0.35,
+          "mask_high_freq": 0.25,
+          "mask_low_freq": 0.2,
+          "mask_all_ac": 0.2
+        },
+        "Task2": {
+          "no_bc": 0.5,
+          "partial_bc": 0.3,
+          "multi_ac_nr": 0.2
+        },
+        "Task3": {
+          "no_peak": 0.1,
+          "no_width": 0.05,
+          "np_like": 0.25,
+          "no_tymp": 0.6
+        }
+      }
+    },
+    "m20_heavy_balanced": {
+      "missing_aug_p": 0.2,
+      "missing_aug_strategy_weights": {
+        "Task1": {
+          "mask_pta": 0.25,
+          "mask_high_freq": 0.25,
+          "mask_low_freq": 0.2,
+          "mask_all_ac": 0.3
+        },
+        "Task2": {
+          "no_bc": 0.55,
+          "partial_bc": 0.25,
+          "multi_ac_nr": 0.2
+        },
+        "Task3": {
+          "no_peak": 0.15,
+          "no_width": 0.1,
+          "np_like": 0.25,
+          "no_tymp": 0.5
+        }
+      }
+    },
+    "m30_stress": {
+      "missing_aug_p": 0.3,
+      "missing_aug_strategy_weights": {
+        "Task1": {
+          "mask_pta": 0.2,
+          "mask_high_freq": 0.2,
+          "mask_low_freq": 0.2,
+          "mask_all_ac": 0.4
+        },
+        "Task2": {
+          "no_bc": 0.7,
+          "partial_bc": 0.2,
+          "multi_ac_nr": 0.1
+        },
+        "Task3": {
+          "no_peak": 0.1,
+          "no_width": 0.05,
+          "np_like": 0.25,
+          "no_tymp": 0.6
+        }
+      }
+    }
+  },
+  "run_configs": [
+    {
+      "name": "run_01_base_m05_balanced_r015",
+      "model_size": "base",
+      "missing_profile": "m05_balanced",
+      "reward_weight": 0.15
+    },
+    {
+      "name": "run_02_base_m10_balanced_r015",
+      "model_size": "base",
+      "missing_profile": "m10_balanced",
+      "reward_weight": 0.15
+    },
+    {
+      "name": "run_03_base_m15_bc_dominant_r015",
+      "model_size": "base",
+      "missing_profile": "m15_bc_dominant",
+      "reward_weight": 0.15
+    },
+    {
+      "name": "run_04_base_m15_tymp_dominant_r015",
+      "model_size": "base",
+      "missing_profile": "m15_tymp_dominant",
+      "reward_weight": 0.15
+    },
+    {
+      "name": "run_05_base_m20_heavy_balanced_r010",
+      "model_size": "base",
+      "missing_profile": "m20_heavy_balanced",
+      "reward_weight": 0.1
+    },
+    {
+      "name": "run_06_small_m05_balanced_r015",
+      "model_size": "small",
+      "missing_profile": "m05_balanced",
+      "reward_weight": 0.15
+    },
+    {
+      "name": "run_07_small_m10_balanced_r015",
+      "model_size": "small",
+      "missing_profile": "m10_balanced",
+      "reward_weight": 0.15
+    },
+    {
+      "name": "run_08_small_m15_bc_dominant_r015",
+      "model_size": "small",
+      "missing_profile": "m15_bc_dominant",
+      "reward_weight": 0.15
+    },
+    {
+      "name": "run_09_small_m15_tymp_dominant_r015",
+      "model_size": "small",
+      "missing_profile": "m15_tymp_dominant",
+      "reward_weight": 0.15
+    },
+    {
+      "name": "run_10_small_m20_heavy_balanced_r010",
+      "model_size": "small",
+      "missing_profile": "m20_heavy_balanced",
+      "reward_weight": 0.1
+    },
+    {
+      "name": "run_11_tiny_m05_balanced_r010",
+      "model_size": "tiny",
+      "missing_profile": "m05_balanced",
+      "reward_weight": 0.1
+    },
+    {
+      "name": "run_12_tiny_m10_balanced_r010",
+      "model_size": "tiny",
+      "missing_profile": "m10_balanced",
+      "reward_weight": 0.1
+    },
+    {
+      "name": "run_13_tiny_m15_bc_dominant_r010",
+      "model_size": "tiny",
+      "missing_profile": "m15_bc_dominant",
+      "reward_weight": 0.1
+    },
+    {
+      "name": "run_14_tiny_m15_tymp_dominant_r010",
+      "model_size": "tiny",
+      "missing_profile": "m15_tymp_dominant",
+      "reward_weight": 0.1
+    },
+    {
+      "name": "run_15_tiny_m20_heavy_balanced_r005",
+      "model_size": "tiny",
+      "missing_profile": "m20_heavy_balanced",
+      "reward_weight": 0.05
+    }
+  ],
+  "ablation_run_configs": [
+    {
+      "name": "ablation_base_m10_equal_steps_r015",
+      "model_size": "base",
+      "missing_profile": "m10_balanced",
+      "reward_weight": 0.15,
+      "task_sampling_mode": "equal_steps"
+    },
+    {
+      "name": "ablation_base_m10_rr_k4_r015",
+      "model_size": "base",
+      "missing_profile": "m10_balanced",
+      "reward_weight": 0.15,
+      "task_sampling_mode": "round_robin_k4"
+    },
+    {
+      "name": "ablation_base_m10_support2_r015",
+      "model_size": "base",
+      "missing_profile": "m10_balanced",
+      "reward_weight": 0.15,
+      "support_per_class": 2
+    },
+    {
+      "name": "ablation_base_m20_high_reward_r020",
+      "model_size": "base",
+      "missing_profile": "m20_heavy_balanced",
+      "reward_weight": 0.2
+    },
+    {
+      "name": "ablation_base_m30_stress_r010",
+      "model_size": "base",
+      "missing_profile": "m30_stress",
+      "reward_weight": 0.1
+    }
+  ]
+}

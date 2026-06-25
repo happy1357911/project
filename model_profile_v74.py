@@ -176,13 +176,22 @@ def profile_hybrid_predictions(path: Path, args) -> pd.DataFrame:
     df = pd.read_csv(path, usecols=lambda col: col in {
         "task",
         "baseline_covered",
+        "complete_for_rule",
         "rule_confidence",
         "pred_label",
         "forced_pred_label",
     })
     if df.empty:
         return pd.DataFrame()
-    covered = df["baseline_covered"].astype(str).str.strip().str.lower().isin({"true", "1", "yes"}).to_numpy()
+    covered = df["baseline_covered"].astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+    if "complete_for_rule" in df.columns:
+        complete_raw = df["complete_for_rule"]
+        complete = complete_raw.astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+        complete = complete.mask(complete_raw.isna(), covered)
+    else:
+        complete = covered
+    covered = covered.to_numpy()
+    complete = complete.astype(bool).to_numpy()
     rule_conf = pd.to_numeric(df["rule_confidence"], errors="coerce").fillna(0.0).to_numpy()
     model_pred = df["pred_label"].astype(str).to_numpy()
     rule_pred = df["forced_pred_label"].astype(str).to_numpy()
@@ -191,11 +200,11 @@ def profile_hybrid_predictions(path: Path, args) -> pd.DataFrame:
         idx = np.array(list(sub_idx), dtype=int)
         elapsed = []
         for _ in range(args.warmup):
-            use_rule = covered[idx] & (rule_conf[idx] >= args.rule_confidence_threshold)
+            use_rule = complete[idx] & covered[idx] & (rule_conf[idx] >= args.rule_confidence_threshold)
             np.where(use_rule, rule_pred[idx], model_pred[idx])
         for _ in range(args.repeats):
             start = time.perf_counter()
-            use_rule = covered[idx] & (rule_conf[idx] >= args.rule_confidence_threshold)
+            use_rule = complete[idx] & covered[idx] & (rule_conf[idx] >= args.rule_confidence_threshold)
             np.where(use_rule, rule_pred[idx], model_pred[idx])
             elapsed.append(time.perf_counter() - start)
         mean_ms = 1000.0 * sum(elapsed) / max(len(elapsed), 1)

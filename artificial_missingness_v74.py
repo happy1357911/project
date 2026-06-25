@@ -113,6 +113,21 @@ SCENARIO_METADATA_COLUMNS = [
     "clinical_question",
 ]
 
+SCENARIO_FORCE_MODEL_FALLBACK = {
+    "Task2": {
+        "task2_ac_only",
+        "task2_no_bc",
+        "task2_partial_bc_500_1000",
+        "task2_abg_borderline_shift",
+    },
+    "Task3": {
+        "task3_no_peak",
+        "task3_no_width",
+        "task3_np_like",
+        "task3_no_tymp",
+    },
+}
+
 
 def load_model(checkpoint_path: str, device: torch.device):
     ckpt = torch.load(checkpoint_path, map_location="cpu")
@@ -205,13 +220,14 @@ def apply_artificial_missingness(df: pd.DataFrame, task_name: str, scenario: str
             out["abg_4000Hz_censored"] = 0.0
 
         if scenario == "task2_multi_frequency_nr":
-            for hz in (2000, 4000):
+            for hz in (2000, 4000, 6000, 8000):
                 out[f"ac_{hz}Hz"] = TASK2_AC_NR_LIMITS_DB.get(hz, 120.0)
                 out[f"ac_{hz}Hz_nr"] = 1.0
-                bc = pd.to_numeric(out.get(f"bc_{hz}Hz", np.nan), errors="coerce")
-                out[f"abg_{hz}Hz"] = out[f"ac_{hz}Hz"] - bc
-                out[f"abg_{hz}Hz_missing"] = bc.isna().astype(float)
-                out[f"abg_{hz}Hz_censored"] = (~bc.isna()).astype(float)
+                if hz in TASK2_ABG_FREQS:
+                    bc = pd.to_numeric(out.get(f"bc_{hz}Hz", np.nan), errors="coerce")
+                    out[f"abg_{hz}Hz"] = out[f"ac_{hz}Hz"] - bc
+                    out[f"abg_{hz}Hz_missing"] = bc.isna().astype(float)
+                    out[f"abg_{hz}Hz_censored"] = (~bc.isna()).astype(float)
 
         if scenario == "task2_bc_4000_nr":
             out["bc_4000Hz"] = TASK2_BC_NR_LIMITS_DB.get(4000, 75.0)
@@ -227,8 +243,8 @@ def apply_artificial_missingness(df: pd.DataFrame, task_name: str, scenario: str
                 out[f"bc_{hz}Hz_missing"] = 0.0
                 out[f"bc_{hz}Hz_nr"] = 0.0
                 ac = pd.to_numeric(out.get(f"ac_{hz}Hz", np.nan), errors="coerce")
-                out[f"bc_{hz}Hz"] = ac - 15.0
-                out[f"abg_{hz}Hz"] = 15.0
+                out[f"bc_{hz}Hz"] = ac - 10.0
+                out[f"abg_{hz}Hz"] = 10.0
                 out[f"abg_{hz}Hz_missing"] = ac.isna().astype(float)
                 out[f"abg_{hz}Hz_censored"] = 0.0
 
@@ -444,6 +460,27 @@ def parse_checkpoint_identity(checkpoint_path: str) -> dict:
     }
 
 
+def scenario_requires_model_fallback(task_name: str, scenario: str) -> bool:
+    return scenario in SCENARIO_FORCE_MODEL_FALLBACK.get(task_name, set())
+
+
+def apply_scenario_rule_policy(rule_info: dict, task_name: str, scenario: str) -> dict:
+    out = dict(rule_info)
+    if not scenario_requires_model_fallback(task_name, scenario):
+        out["scenario_forced_model_fallback"] = False
+        return out
+
+    warnings = [part for part in str(out.get("warning_reasons") or "").split(";") if part]
+    warnings.append("scenario_forced_model_fallback")
+    out["baseline_covered"] = False
+    out["complete_for_rule"] = False
+    out["abstain_rule_label"] = INSUFFICIENT_EVIDENCE_LABEL
+    out["rule_confidence"] = min(float(out.get("rule_confidence", 0.0) or 0.0), 0.5)
+    out["warning_reasons"] = ";".join(dict.fromkeys(warnings))
+    out["scenario_forced_model_fallback"] = True
+    return out
+
+
 def strategy_predictions(
     rule_info: dict,
     model_pred: str,
@@ -453,9 +490,10 @@ def strategy_predictions(
 ) -> dict:
     rule_confidence = float(rule_info.get("rule_confidence", 0.0) or 0.0)
     baseline_covered = bool(rule_info.get("baseline_covered", False))
+    complete_for_rule = bool(rule_info.get("complete_for_rule", baseline_covered))
     forced = str(rule_info.get("forced_rule_label") or INSUFFICIENT_EVIDENCE_LABEL)
     abstain = str(rule_info.get("abstain_rule_label") or INSUFFICIENT_EVIDENCE_LABEL)
-    use_rule = baseline_covered and rule_confidence >= float(threshold)
+    use_rule = complete_for_rule and baseline_covered and rule_confidence >= float(threshold)
     confidence_threshold = max(0.0, min(1.0, float(model_confidence_threshold or 0.0)))
     confidence_value = None if model_confidence is None else float(model_confidence)
     low_confidence = (
@@ -583,6 +621,7 @@ def run_experiment(args):
                 for idx, (truth, model_pred, conf) in enumerate(zip(y_true, y_model, confidences)):
                     row = scenario_df.iloc[idx]
                     rule_info = clinical_warning_summary(task_name, row.to_dict(), model_pred=model_pred)
+                    rule_info = apply_scenario_rule_policy(rule_info, task_name, scenario)
                     preds = strategy_predictions(
                         rule_info,
                         model_pred,
@@ -614,11 +653,13 @@ def run_experiment(args):
                             "forced_rule_label": rule_info.get("forced_rule_label"),
                             "abstain_rule_label": rule_info.get("abstain_rule_label"),
                             "baseline_covered": bool(rule_info.get("baseline_covered", False)),
+                            "complete_for_rule": bool(rule_info.get("complete_for_rule", rule_info.get("baseline_covered", False))),
                             "rule_confidence": float(rule_info.get("rule_confidence", 0.0) or 0.0),
                             "evidence_status": rule_info.get("evidence_status"),
                             "compatible_labels": rule_info.get("compatible_labels"),
                             "rule_model_conflict": bool(rule_info.get("rule_model_conflict", False)),
                             "warning_reasons": rule_info.get("warning_reasons"),
+                            "scenario_forced_model_fallback": bool(rule_info.get("scenario_forced_model_fallback", False)),
                             "hybrid_used_rule": bool(preds["hybrid_used_rule"]),
                             "hybrid_used_model": bool(preds["hybrid_used_model"]),
                             "hybrid_confidence_gate_used_rule": bool(preds["hybrid_confidence_gate_used_rule"]),
@@ -673,6 +714,7 @@ def run_experiment(args):
             "hybrid_rule_first_confidence_gate",
         ],
         "scenario_metadata": SCENARIO_METADATA,
+        "scenario_force_model_fallback": {task: sorted(values) for task, values in SCENARIO_FORCE_MODEL_FALLBACK.items()},
         "outputs": {
             "summary": str(out_dir / "artificial_missingness_summary.csv"),
             "degradation_summary": str(out_dir / "artificial_missingness_degradation_summary.csv"),
