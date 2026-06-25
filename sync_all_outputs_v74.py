@@ -27,6 +27,8 @@ DEFAULT_FILES = [
     "sync_all_outputs_v74.py",
     "train_v74.py",
     "configs/run_configs_v74.json",
+    "configs/splits/run_configs_v74_part_A.json",
+    "configs/splits/run_configs_v74_part_B.json",
     "requirements.txt",
     "requirements6_clean.txt",
     "rule.md",

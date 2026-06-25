@@ -1,3 +1,23 @@
+<!-- 2026-06-26-distributed-split-configs -->
+
+## 2026-06-26 Distributed Split Configs
+
+Two split config files were added for running the 20 JSON-defined configs across two computers:
+
+- `configs/splits/run_configs_v74_part_A.json`: 10 configs, odd-indexed balanced split.
+- `configs/splits/run_configs_v74_part_B.json`: 10 configs, complementary split.
+
+`train_v74.py` now supports `schema_version = v1_split`. A split JSON points to `../run_configs_v74.json` and selects configs by `include_config_names`. Missing names or duplicate names raise an error; there is no fallback to another split file.
+
+Recommended distributed training pattern:
+
+```powershell
+python train_v74.py --data_dir . --results_dir results_v74_part_A --seeds 0,1,2,3,4 --experiments full,no_meta,no_irl,single_task --single_task_target all --config_preset all --run_config_file configs/splits/run_configs_v74_part_A.json --locked_split_manifest results_v74/split_protocol/split_manifest.csv
+```
+
+Use `part_B` and `results_v74_part_B` on the second computer. After both finish, merge the config directories under `results_v74_part_*/five_runs/` into one master `results_v74/five_runs/`, then run post-processing on the master computer.
+
+<!-- /2026-06-26-distributed-split-configs -->
 <!-- 2026-06-25-p0-p4-gpt-analysis-update -->
 
 ## 2026-06-25 P0-P4 GPT Analysis Response Update

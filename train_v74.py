@@ -293,27 +293,33 @@ CONFIG_PRESET_TO_SPEC_KEY = {
 CONFIG_ENTRY_KEYS = {"name", "model_size", "missing_profile", "reward_weight"}
 
 
-def resolve_run_config_file(path_value: str) -> Path:
+SUPPORTED_RUN_CONFIG_SCHEMAS = {"v1", "v1_split"}
+
+
+def resolve_run_config_file(path_value: str, base_dir: Path | None = None) -> Path:
     path = Path(path_value or DEFAULT_RUN_CONFIG_FILE)
     if not path.is_absolute():
-        path = Path(__file__).resolve().parent / path
+        root = base_dir if base_dir is not None else Path(__file__).resolve().parent
+        path = root / path
     return path.resolve()
 
 
-def load_run_config_spec(path_value: str) -> dict:
-    config_path = resolve_run_config_file(path_value)
+def load_run_config_spec(path_value: str, base_dir: Path | None = None) -> dict:
+    config_path = resolve_run_config_file(path_value, base_dir=base_dir)
     if not config_path.exists():
         raise FileNotFoundError(
             f"Run config file not found: {config_path}. "
-            "Expected JSON such as configs/run_configs_v74.json."
+            "Expected JSON such as configs/run_configs_v74.json or a v1_split JSON."
         )
     with config_path.open("r", encoding="utf-8") as fh:
         spec = json.load(fh)
     if not isinstance(spec, dict):
         raise ValueError(f"Run config file must contain a JSON object: {config_path}")
-    if str(spec.get("schema_version")) != "v1":
+    schema_version = str(spec.get("schema_version"))
+    if schema_version not in SUPPORTED_RUN_CONFIG_SCHEMAS:
         raise ValueError(f"Unsupported run config schema_version in {config_path}: {spec.get('schema_version')}")
     spec["_config_path"] = str(config_path)
+    spec["_schema_version"] = schema_version
     return spec
 
 
@@ -429,8 +435,75 @@ def build_run_config_from_spec_entry(
     return cfg
 
 
+def _require_name_list(spec: dict, key: str) -> list[str]:
+    value = spec.get(key)
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"Run config split JSON key '{key}' must be a non-empty list.")
+    names = [str(item).strip() for item in value]
+    if any(not name for name in names):
+        raise ValueError(f"Run config split JSON key '{key}' contains an empty config name.")
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"Run config split JSON key '{key}' contains duplicate names: {duplicates}")
+    return names
+
+
+def _validate_unique_run_config_names(selected: dict) -> None:
+    names = [cfg["name"] for configs in (selected["recommended"], selected["ablation"]) for cfg in configs]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"Run config names must be unique. Duplicates: {duplicates}")
+
+
+def _filter_run_config_sets_for_split(base_selected: dict, split_spec: dict) -> dict:
+    include_names = _require_name_list(split_spec, "include_config_names")
+    all_configs = base_selected["all"]
+    name_to_cfg = {cfg["name"]: cfg for cfg in all_configs}
+    missing = [name for name in include_names if name not in name_to_cfg]
+    if missing:
+        raise ValueError(f"Split run config references unknown config names: {missing}")
+
+    expected_total = split_spec.get("expected_total_configs")
+    if expected_total is not None and int(expected_total) != len(include_names):
+        raise ValueError(
+            f"Split expected_total_configs={expected_total} but include_config_names has {len(include_names)} entries."
+        )
+
+    recommended_names = {cfg["name"] for cfg in base_selected["recommended"]}
+    ablation_names = {cfg["name"] for cfg in base_selected["ablation"]}
+    part_name = str(split_spec.get("part_name") or Path(split_spec["_config_path"]).stem)
+    split_config_path = str(split_spec["_config_path"])
+
+    selected_all = []
+    for name in include_names:
+        cfg = copy.deepcopy(name_to_cfg[name])
+        cfg["distributed_split_part"] = part_name
+        cfg["distributed_split_config"] = split_config_path
+        selected_all.append(cfg)
+
+    selected = {
+        "recommended": [cfg for cfg in selected_all if cfg["name"] in recommended_names],
+        "ablation": [cfg for cfg in selected_all if cfg["name"] in ablation_names],
+        "all": selected_all,
+    }
+    if not selected["all"]:
+        raise ValueError(f"Split run config contains no selected configs: {split_config_path}")
+    _validate_unique_run_config_names(selected)
+    return selected
+
+
 def load_run_config_sets(config_path: str) -> tuple[dict, str]:
     spec = load_run_config_spec(config_path)
+    if spec.get("_schema_version") == "v1_split":
+        base_config_file = spec.get("base_config_file")
+        if not isinstance(base_config_file, str) or not base_config_file.strip():
+            raise ValueError("Run config split JSON must define non-empty base_config_file.")
+        split_path = Path(spec["_config_path"])
+        base_config_path = resolve_run_config_file(base_config_file, base_dir=split_path.parent)
+        base_selected, base_loaded_path = load_run_config_sets(str(base_config_path))
+        selected = _filter_run_config_sets_for_split(base_selected, spec)
+        return selected, f"{split_path} -> {base_loaded_path}"
+
     model_size_configs = _require_mapping(spec, "model_size_configs")
     missing_aug_profiles = _require_mapping(spec, "missing_aug_profiles")
     _validate_model_size_configs(model_size_configs)
@@ -446,10 +519,7 @@ def load_run_config_sets(config_path: str) -> tuple[dict, str]:
         ]
     selected["all"] = [*selected["recommended"], *selected["ablation"]]
 
-    names = [cfg["name"] for configs in (selected["recommended"], selected["ablation"]) for cfg in configs]
-    duplicates = sorted({name for name in names if names.count(name) > 1})
-    if duplicates:
-        raise ValueError(f"Run config names must be unique. Duplicates: {duplicates}")
+    _validate_unique_run_config_names(selected)
     return selected, str(spec["_config_path"])
 
 
@@ -2718,14 +2788,14 @@ def parse_args():
         type=str,
         default="recommended",
         choices=["recommended", "ablation", "all"],
-        help="recommended = 15 masked run_configs; ablation = 5 masked ablation_run_configs; all = both (20 configs).",
+        help="recommended = run_configs; ablation = ablation_run_configs; all = both. Full v1 JSON has 15+5 configs; v1_split JSON can select a subset.",
     )
     p.add_argument(
         "--run_config_file",
         "--run-config-file",
         type=str,
         default=str(DEFAULT_RUN_CONFIG_FILE),
-        help="External JSON file defining model sizes, missingness profiles, RUN_CONFIGS, and ABLATION_RUN_CONFIGS.",
+        help="External v1 JSON or v1_split JSON selecting a subset from a base v1 JSON.",
     )
     p.add_argument(
         "--split_manifest",

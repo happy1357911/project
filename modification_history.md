@@ -1,5 +1,28 @@
 # Modification History
 
+<!-- 2026-06-26-distributed-split-configs -->
+
+## 2026-06-26 Distributed Split Config Support
+
+**Modification Time**: 2026-06-26 01:40
+
+**Reason and Meaning**: Added formal support for distributing the 20 run configs across two computers. This avoids manual deletion of configs and avoids unsafe fallback behavior.
+
+**Files and Scope**:
+- `train_v74.py`: added `schema_version = v1_split` support. A split JSON resolves a base v1 JSON, filters configs by `include_config_names`, validates duplicates, validates unknown names, and annotates selected configs with split metadata.
+- `configs/splits/run_configs_v74_part_A.json`: selects 10 configs for computer A.
+- `configs/splits/run_configs_v74_part_B.json`: selects the complementary 10 configs for computer B.
+- `sync_all_outputs_v74.py`: includes the split JSON files in the analysis package.
+
+**Concrete Changes**: Full v1 JSON still requires 15 recommended + 5 ablation configs. v1_split JSON may select a subset from the full base config without weakening the full-config validation.
+
+**Before vs After**: Before, only the full 20-config JSON was accepted. After, each computer can run an explicit 10-config split using `--run_config_file configs/splits/run_configs_v74_part_A.json` or `part_B.json`.
+
+**Follow-up**: After both computers finish training, merge `five_runs` directories into one master `results_v74/five_runs/` and run post-processing on the master computer.
+
+<!-- /2026-06-26-distributed-split-configs -->
+
+
 <!-- 2026-06-25-p0-p4-gpt-analysis-update -->
 
 ## 2026-06-25 P0-P4 GPT Analysis Response Implementation
