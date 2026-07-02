@@ -40,6 +40,26 @@ DEFAULT_CHECKPOINT = DEFAULT_PRIMARY_CHECKPOINT
 DEFAULT_RULE_CONFIDENCE_THRESHOLD = 0.8
 DEFAULT_MODEL_CONFIDENCE_THRESHOLD = 0.6
 
+ANALYSIS_TABLES = [
+    ("Hybrid clinical value / no-support", Path("paper_v74/tables/main_hybrid_summary.csv")),
+    ("Hybrid clinical value / locked-test", Path("paper_v74/tables/main_hybrid_summary_locked_test.csv")),
+    ("Hybrid threshold sweep / no-support", Path("paper_v74/hybrid_evaluation/hybrid_threshold_sweep.csv")),
+    ("Hybrid threshold sweep / locked-test", Path("paper_v74/hybrid_evaluation/hybrid_threshold_sweep_locked_test.csv")),
+    ("Hybrid McNemar comparison / no-support", Path("paper_v74/hybrid_evaluation/hybrid_strategy_mcnemar.csv")),
+    ("Hybrid McNemar comparison / locked-test", Path("paper_v74/hybrid_evaluation/hybrid_strategy_mcnemar_locked_test.csv")),
+    ("Clinical error taxonomy", Path("paper_v74/error_analysis/clinical_error_taxonomy_summary.csv")),
+    ("Calibration policy / no-support", Path("results_v74/calibration_analysis/calibration_policy_summary.csv")),
+    ("Calibration policy / locked-test", Path("results_v74/calibration_analysis_locked_test/calibration_policy_summary.csv")),
+]
+
+
+@st.cache_data(show_spinner=False)
+def load_optional_csv(path: str) -> pd.DataFrame:
+    csv_path = Path(path)
+    if not csv_path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(csv_path)
+
 
 def safe_pick_device():
     try:
@@ -118,7 +138,20 @@ def load_model(path=DEFAULT_CHECKPOINT):
 
 
 st.title("Audiologist-Guided Hearing Decision Support v7.4")
-st.caption("Ear-level task-conditioned inference")
+st.caption("Ear-level rule/model/hybrid decision support under incomplete evidence")
+
+with st.expander("Formal analysis outputs", expanded=False):
+    found_any_table = False
+    for table_label, table_path in ANALYSIS_TABLES:
+        table_df = load_optional_csv(str(table_path))
+        if table_df.empty:
+            continue
+        found_any_table = True
+        st.markdown(f"**{table_label}**  ")
+        st.caption(str(table_path))
+        st.dataframe(table_df.head(200), use_container_width=True)
+    if not found_any_table:
+        st.info("Formal analysis tables are not available yet. Run run_all_v74.py to generate paper_v74/ and results_v74/ outputs.")
 
 with st.sidebar:
     st.subheader("Checkpoint")
@@ -314,16 +347,13 @@ def predict_single(row_dict, task_name, side="right"):
         rule_confidence = float(warning.get("rule_confidence") or 0.0)
         baseline_covered = bool(warning.get("baseline_covered", False))
         complete_for_rule = bool(warning.get("complete_for_rule", baseline_covered))
-        hybrid_uses_rule = (
-            complete_for_rule
-            and baseline_covered
-            and rule_label not in {None, "", INSUFFICIENT_EVIDENCE_LABEL}
-            and rule_confidence >= DEFAULT_RULE_CONFIDENCE_THRESHOLD
-        )
+        rule_label_available = rule_label not in {None, "", INSUFFICIENT_EVIDENCE_LABEL}
+        warning_reasons = str(warning.get("warning_reasons") or "").strip(";")
+        hybrid_uses_rule = rule_label_available and rule_confidence >= DEFAULT_RULE_CONFIDENCE_THRESHOLD
         if hybrid_uses_rule:
             hybrid_decision = rule_label
             hybrid_source = "rule"
-            hybrid_decision_reason = "rule_complete_high_confidence"
+            hybrid_decision_reason = "rule_score_ge_threshold_with_warning" if warning_reasons else "rule_score_ge_threshold"
         elif model_confidence < DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
             hybrid_decision = INSUFFICIENT_EVIDENCE_LABEL
             hybrid_source = "abstain"
@@ -331,12 +361,10 @@ def predict_single(row_dict, task_name, side="right"):
         else:
             hybrid_decision = pred_name
             hybrid_source = "model"
-            if not complete_for_rule:
-                hybrid_decision_reason = "model_fallback_incomplete_rule_data"
-            elif not baseline_covered:
-                hybrid_decision_reason = "model_fallback_rule_abstained"
+            if not rule_label_available:
+                hybrid_decision_reason = "model_fallback_no_rule_prediction"
             elif rule_confidence < DEFAULT_RULE_CONFIDENCE_THRESHOLD:
-                hybrid_decision_reason = "model_fallback_low_rule_confidence"
+                hybrid_decision_reason = "model_fallback_low_rule_score"
             else:
                 hybrid_decision_reason = "model_fallback"
         results[lbl] = {

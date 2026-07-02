@@ -286,6 +286,244 @@ ABLATION_RUN_CONFIGS = [
     ),
 ]
 
+DEFAULT_RUN_CONFIG_FILE = Path("configs/run_configs_v74.json")
+CONFIG_PRESET_TO_SPEC_KEY = {
+    "recommended": "run_configs",
+    "ablation": "ablation_run_configs",
+}
+CONFIG_ENTRY_KEYS = {"name", "model_size", "missing_profile", "reward_weight"}
+
+
+SUPPORTED_RUN_CONFIG_SCHEMAS = {"v1", "v1_split"}
+
+
+def resolve_run_config_file(path_value: str, base_dir: Path | None = None) -> Path:
+    path = Path(path_value or DEFAULT_RUN_CONFIG_FILE)
+    if not path.is_absolute():
+        root = base_dir if base_dir is not None else Path(__file__).resolve().parent
+        path = root / path
+    return path.resolve()
+
+
+def load_run_config_spec(path_value: str, base_dir: Path | None = None) -> dict:
+    config_path = resolve_run_config_file(path_value, base_dir=base_dir)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Run config file not found: {config_path}. "
+            "Expected JSON such as configs/run_configs_v74.json or a v1_split JSON."
+        )
+    with config_path.open("r", encoding="utf-8") as fh:
+        spec = json.load(fh)
+    if not isinstance(spec, dict):
+        raise ValueError(f"Run config file must contain a JSON object: {config_path}")
+    schema_version = str(spec.get("schema_version"))
+    if schema_version not in SUPPORTED_RUN_CONFIG_SCHEMAS:
+        raise ValueError(f"Unsupported run config schema_version in {config_path}: {spec.get('schema_version')}")
+    spec["_config_path"] = str(config_path)
+    spec["_schema_version"] = schema_version
+    return spec
+
+
+def _require_mapping(spec: dict, key: str) -> dict:
+    value = spec.get(key)
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"Run config JSON key '{key}' must be a non-empty object.")
+    return value
+
+
+def _require_list(spec: dict, key: str, expected_len: int) -> list:
+    value = spec.get(key)
+    if not isinstance(value, list):
+        raise ValueError(f"Run config JSON key '{key}' must be a list.")
+    if len(value) != expected_len:
+        raise ValueError(f"Run config JSON key '{key}' must contain {expected_len} entries, got {len(value)}.")
+    return value
+
+
+def _validate_model_size_configs(model_size_configs: dict) -> None:
+    required = {"d_model", "nhead", "num_layers", "dropout", "proto_alpha", "proto_temperature"}
+    for name, cfg in model_size_configs.items():
+        if not isinstance(cfg, dict):
+            raise ValueError(f"model_size_configs.{name} must be an object.")
+        missing = sorted(required - set(cfg))
+        if missing:
+            raise ValueError(f"model_size_configs.{name} missing fields: {missing}")
+        d_model = int(cfg["d_model"])
+        nhead = int(cfg["nhead"])
+        if nhead <= 0 or d_model % nhead != 0:
+            raise ValueError(f"model_size_configs.{name} has invalid d_model/nhead: {d_model}/{nhead}")
+
+
+def _validate_missing_aug_profiles(missing_aug_profiles: dict) -> None:
+    for name, profile in missing_aug_profiles.items():
+        if not isinstance(profile, dict):
+            raise ValueError(f"missing_aug_profiles.{name} must be an object.")
+        p = float(profile.get("missing_aug_p", -1.0))
+        if p <= 0.0:
+            raise ValueError(f"missing_aug_profiles.{name}.missing_aug_p must be > 0, got {p}")
+        weights = profile.get("missing_aug_strategy_weights")
+        if not isinstance(weights, dict):
+            raise ValueError(f"missing_aug_profiles.{name}.missing_aug_strategy_weights must be an object.")
+        for task_name in ("Task1", "Task2", "Task3"):
+            task_weights = weights.get(task_name)
+            if not isinstance(task_weights, dict) or not task_weights:
+                raise ValueError(f"missing_aug_profiles.{name} missing weights for {task_name}.")
+            values = [float(v) for v in task_weights.values()]
+            if any(v < 0.0 for v in values) or sum(values) <= 0.0:
+                raise ValueError(f"missing_aug_profiles.{name}.{task_name} weights must be non-negative and sum > 0.")
+
+
+def _default_run_values(spec: dict) -> dict:
+    defaults = {
+        "lr": 5e-4,
+        "batch": 512,
+        "epochs": 80,
+        "patience": 15,
+        "weight_decay": 1e-4,
+        "task_sampling_mode": "round_robin_k1",
+        "steps_per_task": None,
+        "support_per_class": 1,
+        "validate_with_meta_support": True,
+    }
+    configured = spec.get("default_run_values", {})
+    if configured is not None:
+        if not isinstance(configured, dict):
+            raise ValueError("Run config JSON key 'default_run_values' must be an object when provided.")
+        defaults.update(copy.deepcopy(configured))
+    return defaults
+
+
+def build_run_config_from_spec_entry(
+    entry: dict,
+    model_size_configs: dict,
+    missing_aug_profiles: dict,
+    default_values: dict,
+) -> dict:
+    if not isinstance(entry, dict):
+        raise ValueError("Each run config entry must be an object.")
+    missing = sorted(CONFIG_ENTRY_KEYS - set(entry))
+    if missing:
+        raise ValueError(f"Run config entry missing fields {missing}: {entry}")
+
+    model_size = str(entry["model_size"])
+    missing_profile = str(entry["missing_profile"])
+    if model_size not in model_size_configs:
+        raise ValueError(f"Unknown model_size '{model_size}' in run config '{entry.get('name')}'.")
+    if missing_profile not in missing_aug_profiles:
+        raise ValueError(f"Unknown missing_profile '{missing_profile}' in run config '{entry.get('name')}'.")
+
+    cfg = copy.deepcopy(default_values)
+    cfg.update(copy.deepcopy(model_size_configs[model_size]))
+    profile = copy.deepcopy(missing_aug_profiles[missing_profile])
+    profile["missing_aug_profile"] = missing_profile
+    cfg.update(profile)
+    cfg.update({
+        "name": str(entry["name"]),
+        "model_size": model_size,
+        "missing_profile": missing_profile,
+        "reward_weight": float(entry["reward_weight"]),
+    })
+    for key, value in entry.items():
+        if key not in CONFIG_ENTRY_KEYS:
+            cfg[key] = copy.deepcopy(value)
+
+    d_model = int(cfg.get("d_model", DEFAULT_MODEL_CONFIG["d_model"]))
+    nhead = int(cfg.get("nhead", DEFAULT_MODEL_CONFIG["nhead"]))
+    if nhead <= 0 or d_model % nhead != 0:
+        raise ValueError(f"Run config '{cfg['name']}' has invalid d_model/nhead: {d_model}/{nhead}")
+    if float(cfg.get("missing_aug_p", 0.0) or 0.0) <= 0.0:
+        raise ValueError(f"Run config '{cfg['name']}' must use missing_aug_p > 0.")
+    return cfg
+
+
+def _require_name_list(spec: dict, key: str) -> list[str]:
+    value = spec.get(key)
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"Run config split JSON key '{key}' must be a non-empty list.")
+    names = [str(item).strip() for item in value]
+    if any(not name for name in names):
+        raise ValueError(f"Run config split JSON key '{key}' contains an empty config name.")
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"Run config split JSON key '{key}' contains duplicate names: {duplicates}")
+    return names
+
+
+def _validate_unique_run_config_names(selected: dict) -> None:
+    names = [cfg["name"] for configs in (selected["recommended"], selected["ablation"]) for cfg in configs]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"Run config names must be unique. Duplicates: {duplicates}")
+
+
+def _filter_run_config_sets_for_split(base_selected: dict, split_spec: dict) -> dict:
+    include_names = _require_name_list(split_spec, "include_config_names")
+    all_configs = base_selected["all"]
+    name_to_cfg = {cfg["name"]: cfg for cfg in all_configs}
+    missing = [name for name in include_names if name not in name_to_cfg]
+    if missing:
+        raise ValueError(f"Split run config references unknown config names: {missing}")
+
+    expected_total = split_spec.get("expected_total_configs")
+    if expected_total is not None and int(expected_total) != len(include_names):
+        raise ValueError(
+            f"Split expected_total_configs={expected_total} but include_config_names has {len(include_names)} entries."
+        )
+
+    recommended_names = {cfg["name"] for cfg in base_selected["recommended"]}
+    ablation_names = {cfg["name"] for cfg in base_selected["ablation"]}
+    part_name = str(split_spec.get("part_name") or Path(split_spec["_config_path"]).stem)
+    split_config_path = str(split_spec["_config_path"])
+
+    selected_all = []
+    for name in include_names:
+        cfg = copy.deepcopy(name_to_cfg[name])
+        cfg["distributed_split_part"] = part_name
+        cfg["distributed_split_config"] = split_config_path
+        selected_all.append(cfg)
+
+    selected = {
+        "recommended": [cfg for cfg in selected_all if cfg["name"] in recommended_names],
+        "ablation": [cfg for cfg in selected_all if cfg["name"] in ablation_names],
+        "all": selected_all,
+    }
+    if not selected["all"]:
+        raise ValueError(f"Split run config contains no selected configs: {split_config_path}")
+    _validate_unique_run_config_names(selected)
+    return selected
+
+
+def load_run_config_sets(config_path: str) -> tuple[dict, str]:
+    spec = load_run_config_spec(config_path)
+    if spec.get("_schema_version") == "v1_split":
+        base_config_file = spec.get("base_config_file")
+        if not isinstance(base_config_file, str) or not base_config_file.strip():
+            raise ValueError("Run config split JSON must define non-empty base_config_file.")
+        split_path = Path(spec["_config_path"])
+        base_config_path = resolve_run_config_file(base_config_file, base_dir=split_path.parent)
+        base_selected, base_loaded_path = load_run_config_sets(str(base_config_path))
+        selected = _filter_run_config_sets_for_split(base_selected, spec)
+        return selected, f"{split_path} -> {base_loaded_path}"
+
+    model_size_configs = _require_mapping(spec, "model_size_configs")
+    missing_aug_profiles = _require_mapping(spec, "missing_aug_profiles")
+    _validate_model_size_configs(model_size_configs)
+    _validate_missing_aug_profiles(missing_aug_profiles)
+    default_values = _default_run_values(spec)
+
+    selected = {}
+    for preset, key in CONFIG_PRESET_TO_SPEC_KEY.items():
+        expected_len = 15 if preset == "recommended" else 5
+        selected[preset] = [
+            build_run_config_from_spec_entry(entry, model_size_configs, missing_aug_profiles, default_values)
+            for entry in _require_list(spec, key, expected_len)
+        ]
+    selected["all"] = [*selected["recommended"], *selected["ablation"]]
+
+    _validate_unique_run_config_names(selected)
+    return selected, str(spec["_config_path"])
+
+
 TASK1_EAR_LEVEL_FEATURES = [
     "ac_500Hz",
     "ac_1000Hz",
@@ -2558,7 +2796,14 @@ def parse_args():
         type=str,
         default="recommended",
         choices=["recommended", "ablation", "all"],
-        help="recommended = built-in RUN_CONFIGS; ablation = built-in ABLATION_RUN_CONFIGS; all = both (20 configs).",
+        help="recommended = run_configs; ablation = ablation_run_configs; all = both. Full v1 JSON has 15+5 configs; v1_split JSON can select a subset.",
+    )
+    p.add_argument(
+        "--run_config_file",
+        "--run-config-file",
+        type=str,
+        default=str(DEFAULT_RUN_CONFIG_FILE),
+        help="External v1 JSON or v1_split JSON selecting a subset from a base v1 JSON.",
     )
     p.add_argument(
         "--split_manifest",
@@ -2598,15 +2843,15 @@ def main():
         experiments = [x.strip() for x in args.experiments.split(",") if x.strip()]
     experiments = expand_experiment_names(experiments, args.single_task_target)
 
-    if args.config_preset == "recommended":
-        selected_config_source = RUN_CONFIGS
-    elif args.config_preset == "ablation":
-        selected_config_source = ABLATION_RUN_CONFIGS
-    elif args.config_preset == "all":
-        selected_config_source = [*RUN_CONFIGS, *ABLATION_RUN_CONFIGS]
-    else:
+    config_sets, loaded_config_path = load_run_config_sets(args.run_config_file)
+    if args.config_preset not in config_sets:
         raise ValueError(f"Unknown config_preset: {args.config_preset}")
-    print(f"[MetaIRL v7.4] Using built-in run configs preset={args.config_preset} n={len(selected_config_source)}")
+    selected_config_source = config_sets[args.config_preset]
+    print(
+        f"[MetaIRL v7.4] Loaded run configs from {loaded_config_path} "
+        f"preset={args.config_preset} n={len(selected_config_source)}"
+    )
+
     run_configs = []
     for cfg in selected_config_source:
         cfg_effective = dict(cfg)

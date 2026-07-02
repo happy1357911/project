@@ -4,7 +4,7 @@ from glob import glob
 from pathlib import Path
 from typing import Iterable
 
-DEFAULT_PRIMARY_CHECKPOINT = "results_v74/five_runs/run_02_base_m10_balanced_r015/full_seed_0/best_model.pth"
+DEFAULT_PRIMARY_CHECKPOINT = "results_v74/five_runs/run_13_tiny_m15_bc_dominant_r010/no_meta_seed_0/best_model.pth"
 
 DEFAULT_CHECKPOINT_GLOBS = (
     "results_v74/five_runs/**/best_model.pth",

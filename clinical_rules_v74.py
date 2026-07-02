@@ -39,6 +39,7 @@ TASK2_ABG_BORDERLINE_LOW_DB = 8.0
 TASK2_ABG_BORDERLINE_HIGH_DB = 10.0
 TASK2_RULE_AC_THRESHOLD_DB = 25.0
 TASK2_RULE_BC_THRESHOLD_DB = 25.0
+RULE_FIRST_SCORE_THRESHOLD = 0.8
 TASK3_C_PEAK_LOWER_DAPA = -300.0
 TASK3_C_PEAK_UPPER_DAPA = -150.0
 
@@ -233,7 +234,7 @@ def infer_task2_hearing_type_from_rule(row: Mapping) -> Tuple[str, bool]:
             any_bc_high = True
 
         if (not abg_missing) and ac is not None and bc is not None:
-            any_abg = any_abg or (abs(ac - bc) > TASK2_RULE_ABG_THRESHOLD_DB)
+            any_abg = any_abg or (abs(ac - bc) >= TASK2_RULE_ABG_THRESHOLD_DB)
 
     if any_abg:
         return ("MHL" if any_bc_high else "CHL"), has_uncertain_evidence
@@ -298,9 +299,9 @@ def task2_evidence_decision(row: Mapping) -> dict:
         bc_present_count += int(bc_value is not None)
         if not abg_missing and ac_value is not None and bc_value is not None:
             abg = abs(ac_value - bc_value)
-            has_clear_abg = has_clear_abg or (abg > TASK2_RULE_ABG_THRESHOLD_DB)
+            has_clear_abg = has_clear_abg or (abg >= TASK2_RULE_ABG_THRESHOLD_DB)
             has_abg_borderline = has_abg_borderline or (
-                TASK2_ABG_BORDERLINE_LOW_DB <= abg <= TASK2_ABG_BORDERLINE_HIGH_DB
+                TASK2_ABG_BORDERLINE_LOW_DB <= abg < TASK2_RULE_ABG_THRESHOLD_DB
             )
 
     no_bc_data = bc_present_count == 0
@@ -348,21 +349,35 @@ def task2_evidence_decision(row: Mapping) -> dict:
     if has_abg_borderline:
         warnings.append("abg_borderline")
 
-    covered = complete_for_rule and not borderline_only
-    if covered:
-        confidence = 1.0
-    elif complete_for_rule and borderline_only:
-        confidence = 0.7
-    elif status in {"bc_missing", "ac_missing", "high_ac_missing", "abg_missing"}:
-        confidence = 0.5
-    else:
-        confidence = 0.25
-
+    score = 1.0
+    score_deductions = []
+    if has_core_ac_missing:
+        score -= 0.15
+        score_deductions.append("core_ac_missing:-0.15")
+    if has_high_ac_pair_missing:
+        score -= 0.05
+        score_deductions.append("high_ac_pair_missing:-0.05")
+    if has_bc_missing:
+        score -= 0.30
+        score_deductions.append("bc_group_missing:-0.30")
+    if has_abg_borderline:
+        score -= 0.10
+        score_deductions.append("abg_borderline:-0.10")
+    if has_abg_missing and not (has_core_ac_missing or has_bc_missing or no_bc_data):
+        score -= 0.15
+        score_deductions.append("abg_missing:-0.15")
+    if no_bc_data:
+        score = min(score, 0.50)
+        score_deductions.append("no_bc_data:cap_0.50")
+    confidence = max(0.0, min(1.0, float(score)))
+    covered = confidence >= RULE_FIRST_SCORE_THRESHOLD
     return {
         "evidence_status": status,
         "covered": bool(covered),
         "complete_for_rule": bool(complete_for_rule),
         "confidence": float(confidence),
+        "rule_evidence_score": float(confidence),
+        "score_deductions": ";".join(score_deductions),
         "warning_flags": tuple(dict.fromkeys(warnings)),
         "has_ac_missing": bool(has_core_ac_missing or has_high_ac_pair_missing),
         "has_any_ac_missing": bool(has_ac_missing),
@@ -436,53 +451,65 @@ def rule_decision(task_name: str, row: Mapping) -> RuleDecision:
         peak_missing = flag_value(row, "tymp_peak_daPa_missing_zero")
         cmpl_missing = flag_value(row, "tymp_peak_mmho_missing_zero")
         width_missing = flag_value(row, "tymp_Width_daPa_missing_zero")
+        vea_missing = flag_value(row, "tymp_Vea_missing_zero") or parse_numeric_value(row.get("tymp_Vea")) is None
         peak = None if peak_np or peak_missing else parse_numeric_value(row.get("tymp_peak_daPa"))
 
         secondary_warnings = []
-        if cmpl_missing:
+        score = 1.0
+        if cmpl_missing and not cmpl_np:
+            score -= 0.10
             secondary_warnings.append("tymp_peak_mmho_missing")
         if width_missing:
+            score -= 0.10
             secondary_warnings.append("tymp_width_missing")
-
+        if vea_missing:
+            score -= 0.05
+            secondary_warnings.append("tymp_vea_missing")
         if peak_np and cmpl_np:
+            confidence = max(0.0, min(1.0, float(score)))
             return RuleDecision(
                 label="B",
-                confidence=1.0,
-                covered=True,
+                confidence=confidence,
+                covered=confidence >= RULE_FIRST_SCORE_THRESHOLD,
                 evidence_status="np_evidence",
                 compatible_labels=("B",),
                 warning_flags=tuple(dict.fromkeys(["np_evidence", *secondary_warnings])),
             )
         if peak is None:
+            confidence = max(0.0, min(0.50, float(score)))
             return RuleDecision(
                 label=None,
-                confidence=0.25,
+                confidence=confidence,
                 covered=False,
                 evidence_status="missing_tymp_data",
                 warning_flags=tuple(dict.fromkeys(["missing_tymp_peak", *secondary_warnings])),
             )
         if peak <= TASK3_C_PEAK_LOWER_DAPA:
+            confidence = max(0.0, min(1.0, float(score)))
             return RuleDecision(
                 label="B",
-                confidence=0.8,
-                covered=True,
+                confidence=confidence,
+                covered=confidence >= RULE_FIRST_SCORE_THRESHOLD,
                 evidence_status="extreme_negative_peak_b",
                 compatible_labels=("B",),
                 warning_flags=tuple(dict.fromkeys(["extreme_negative_peak_b", *secondary_warnings])),
             )
         if peak <= TASK3_C_PEAK_UPPER_DAPA:
+            score -= 0.20
+            confidence = max(0.0, min(1.0, float(score)))
             return RuleDecision(
                 label="C",
-                confidence=0.6,
-                covered=True,
+                confidence=confidence,
+                covered=confidence >= RULE_FIRST_SCORE_THRESHOLD,
                 evidence_status="negative_peak_c_low_confidence",
                 compatible_labels=("C", "B"),
                 warning_flags=tuple(dict.fromkeys(["negative_peak_c_low_confidence", *secondary_warnings])),
             )
+        confidence = max(0.0, min(1.0, float(score)))
         return RuleDecision(
             label="A",
-            confidence=1.0,
-            covered=True,
+            confidence=confidence,
+            covered=confidence >= RULE_FIRST_SCORE_THRESHOLD,
             evidence_status="complete_evidence",
             compatible_labels=("A",),
             warning_flags=tuple(dict.fromkeys(secondary_warnings)),

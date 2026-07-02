@@ -194,17 +194,23 @@ def profile_hybrid_predictions(path: Path, args) -> pd.DataFrame:
     complete = complete.astype(bool).to_numpy()
     rule_conf = pd.to_numeric(df["rule_confidence"], errors="coerce").fillna(0.0).to_numpy()
     model_pred = df["pred_label"].astype(str).to_numpy()
-    rule_pred = df["forced_pred_label"].astype(str).to_numpy()
+    rule_pred_series = df["forced_pred_label"].fillna("").astype(str).str.strip()
+    rule_label_available = (
+        rule_pred_series.ne("")
+        & rule_pred_series.str.lower().ne("none")
+        & rule_pred_series.ne("INSUFFICIENT_EVIDENCE")
+    ).to_numpy()
+    rule_pred = rule_pred_series.to_numpy()
     rows = []
     for task_name, sub_idx in df.groupby("task", dropna=False).indices.items():
         idx = np.array(list(sub_idx), dtype=int)
         elapsed = []
         for _ in range(args.warmup):
-            use_rule = complete[idx] & covered[idx] & (rule_conf[idx] >= args.rule_confidence_threshold)
+            use_rule = rule_label_available[idx] & (rule_conf[idx] >= args.rule_confidence_threshold)
             np.where(use_rule, rule_pred[idx], model_pred[idx])
         for _ in range(args.repeats):
             start = time.perf_counter()
-            use_rule = complete[idx] & covered[idx] & (rule_conf[idx] >= args.rule_confidence_threshold)
+            use_rule = rule_label_available[idx] & (rule_conf[idx] >= args.rule_confidence_threshold)
             np.where(use_rule, rule_pred[idx], model_pred[idx])
             elapsed.append(time.perf_counter() - start)
         mean_ms = 1000.0 * sum(elapsed) / max(len(elapsed), 1)

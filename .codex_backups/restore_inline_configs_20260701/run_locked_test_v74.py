@@ -110,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--locked-test-ratio", type=float, default=0.2)
     parser.add_argument("--seeds", default="0,1,2,3,4")
     parser.add_argument("--config-preset", default="all", choices=["recommended", "ablation", "all"])
+    parser.add_argument("--run-config-file", default="configs/run_configs_v74.json", help="External JSON run config file passed to train_v74.py.")
     parser.add_argument("--experiments", default="full,no_meta,no_irl,single_task")
     parser.add_argument("--single-task-target", default="all", choices=["Task1", "Task2", "Task3", "all"])
     parser.add_argument("--rule-confidence-threshold", type=float, default=0.8)
@@ -183,6 +184,8 @@ def main() -> None:
                 str(results_dir),
                 "--config_preset",
                 args.config_preset,
+                "--run_config_file",
+                args.run_config_file,
                 "--seeds",
                 args.seeds,
                 "--experiments",

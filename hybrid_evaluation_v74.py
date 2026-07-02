@@ -1,8 +1,10 @@
 import argparse
 import json
+import math
 import warnings
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 
@@ -18,6 +20,8 @@ DERIVED_RULE_COLUMNS = [
     "complete_for_rule",
     "evidence_status",
     "rule_confidence",
+    "rule_evidence_score",
+    "score_deductions",
     "warning_reasons",
 ]
 DERIVED_HYBRID_COLUMNS = [
@@ -69,6 +73,8 @@ def load_rule_predictions(path: Path) -> pd.DataFrame:
         "complete_for_rule",
         "evidence_status",
         "rule_confidence",
+        "rule_evidence_score",
+        "score_deductions",
         "warning_reasons",
     ]
     for col in keep_cols:
@@ -130,11 +136,13 @@ def add_hybrid_predictions(
     model_confidence_threshold: float = 0.6,
 ) -> pd.DataFrame:
     out = df.copy()
-    use_rule = (
-        out["complete_for_rule"]
-        & out["baseline_covered"]
-        & out["rule_confidence"].ge(rule_confidence_threshold)
+    rule_label = out["rule_decision_label"].fillna("").astype(str).str.strip()
+    rule_label_available = (
+        rule_label.ne("")
+        & rule_label.str.lower().ne("none")
+        & rule_label.ne(INSUFFICIENT_EVIDENCE_LABEL)
     )
+    use_rule = rule_label_available & out["rule_confidence"].ge(rule_confidence_threshold)
     out["hybrid_pred_label"] = out["pred_label"]
     out.loc[use_rule, "hybrid_pred_label"] = out.loc[use_rule, "rule_decision_label"]
     out["hybrid_used_rule"] = use_rule
@@ -150,11 +158,11 @@ def add_hybrid_predictions(
     out["hybrid_confidence_gate_used_model"] = (~use_rule) & (~low_confidence)
     out["hybrid_model_confidence"] = confidence.astype(float)
 
-    reason = pd.Series("model_fallback", index=out.index, dtype=object)
-    reason = reason.mask(use_rule, "rule_complete_high_confidence")
-    reason = reason.mask((~use_rule) & (~out["complete_for_rule"]), "model_fallback_incomplete_rule_data")
-    reason = reason.mask((~use_rule) & out["complete_for_rule"] & (~out["baseline_covered"]), "model_fallback_rule_abstained")
-    reason = reason.mask((~use_rule) & out["baseline_covered"] & out["rule_confidence"].lt(rule_confidence_threshold), "model_fallback_low_rule_confidence")
+    warning_text = out.get("warning_reasons", pd.Series("", index=out.index)).fillna("").astype(str).str.strip(";")
+    reason = pd.Series("model_fallback_low_rule_score", index=out.index, dtype=object)
+    reason = reason.mask(~rule_label_available, "model_fallback_no_rule_prediction")
+    reason = reason.mask(use_rule & warning_text.ne(""), "rule_score_ge_threshold_with_warning")
+    reason = reason.mask(use_rule & warning_text.eq(""), "rule_score_ge_threshold")
     reason = reason.mask(low_confidence, "abstain_low_model_confidence")
     out["hybrid_decision_reason"] = reason
 
@@ -221,6 +229,144 @@ def iter_groups(df: pd.DataFrame, group_cols: list[str]):
         yield {}, df
 
 
+def non_empty_text_mask(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().ne("")
+
+
+def available_label_mask(series: pd.Series) -> pd.Series:
+    labels = series.fillna(INSUFFICIENT_EVIDENCE_LABEL).astype(str).str.strip()
+    return labels.ne("") & labels.ne(INSUFFICIENT_EVIDENCE_LABEL) & labels.str.lower().ne("nan")
+
+
+def _safe_rate(mask: pd.Series, denom: pd.Series | None = None) -> float:
+    if denom is None:
+        return float(mask.mean()) if len(mask) else math.nan
+    denom = denom.fillna(False).astype(bool)
+    if int(denom.sum()) == 0:
+        return math.nan
+    return float(mask[denom].mean())
+
+
+def compute_clinical_value_metrics(sub: pd.DataFrame, strategy: str = "hybrid_rule_first") -> dict:
+    true_label = sub["true_label"].astype(str)
+    model_pred = sub["pred_label"].astype(str)
+    rule_pred = sub.get("forced_pred_label", pd.Series(INSUFFICIENT_EVIDENCE_LABEL, index=sub.index)).fillna(INSUFFICIENT_EVIDENCE_LABEL).astype(str)
+    rule_available = available_label_mask(rule_pred)
+    model_correct = model_pred.eq(true_label)
+    rule_correct = rule_available & rule_pred.eq(true_label)
+    rule_wrong = rule_available & (~rule_correct)
+    rule_model_conflict = rule_available & rule_pred.ne(model_pred)
+    rule_correction = rule_correct & (~model_correct)
+    warning_source = sub.get("hybrid_warning_reasons", sub.get("warning_reasons", pd.Series("", index=sub.index)))
+    warning_mask = non_empty_text_mask(warning_source)
+
+    if strategy == "hybrid_rule_first_confidence_gate":
+        fallback_mask = sub.get("hybrid_confidence_gate_used_model", pd.Series(False, index=sub.index)).fillna(False).astype(bool)
+        abstain_mask = sub.get("hybrid_low_confidence_abstain", pd.Series(False, index=sub.index)).fillna(False).astype(bool)
+    else:
+        fallback_mask = sub.get("hybrid_used_model", pd.Series(False, index=sub.index)).fillna(False).astype(bool)
+        abstain_mask = pd.Series(False, index=sub.index)
+
+    return {
+        "rule_available_rate": _safe_rate(rule_available),
+        "rule_correct_when_available_rate": _safe_rate(rule_correct, rule_available),
+        "rule_failure_rate": _safe_rate(rule_wrong, rule_available),
+        "rule_correction_rate": _safe_rate(rule_correction),
+        "model_fallback_success_rate": _safe_rate(fallback_mask & model_correct, fallback_mask),
+        "rule_model_conflict_rate": _safe_rate(rule_model_conflict),
+        "warning_rate": _safe_rate(warning_mask | abstain_mask),
+    }
+
+
+def parse_threshold_list(value: str) -> list[float]:
+    values = []
+    for part in str(value).split(','):
+        part = part.strip()
+        if part:
+            values.append(float(part))
+    return values or [0.8]
+
+
+def build_threshold_sweep(base_merged: pd.DataFrame, rule_thresholds: list[float], model_thresholds: list[float]) -> pd.DataFrame:
+    group_cols = [col for col in ["config_name", "exp_name", "seed", "prediction_file", "evaluation_mode"] if col in base_merged.columns]
+    rows = []
+    for rule_threshold in rule_thresholds:
+        for model_threshold in model_thresholds:
+            merged = add_hybrid_predictions(
+                base_merged,
+                rule_confidence_threshold=rule_threshold,
+                model_confidence_threshold=model_threshold,
+            )
+            for base, sub in iter_groups(merged, group_cols):
+                row = {
+                    **base,
+                    "rule_confidence_threshold": float(rule_threshold),
+                    "model_confidence_threshold": float(model_threshold),
+                    "strategy": "hybrid_rule_first_confidence_gate",
+                }
+                task_metrics = []
+                for task_name, task_sub in sub.groupby("task", dropna=False):
+                    metrics = metric_dict(task_sub["true_label"], task_sub["hybrid_uncertainty_gated_pred_label"])
+                    row[f"{task_name}_macro_f1"] = metrics["macro_f1"]
+                    row[f"{task_name}_accuracy"] = metrics["accuracy"]
+                    row[f"{task_name}_balanced_accuracy"] = metrics["balanced_accuracy"]
+                    task_metrics.append(metrics["macro_f1"])
+                row["mean_macro_f1"] = float(np.nanmean(task_metrics)) if task_metrics else math.nan
+                row.update(compute_clinical_value_metrics(sub, "hybrid_rule_first_confidence_gate"))
+                rows.append(row)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    sort_cols = [col for col in group_cols if col in out.columns] + ["rule_confidence_threshold", "model_confidence_threshold"]
+    return out.sort_values(sort_cols).reset_index(drop=True)
+
+
+def mcnemar_p_value(b: int, c: int) -> float:
+    discordant = b + c
+    if discordant == 0:
+        return 1.0
+    statistic = (abs(b - c) - 1.0) ** 2 / discordant
+    return float(math.erfc(math.sqrt(max(statistic, 0.0) / 2.0)))
+
+
+def build_strategy_mcnemar_tests(merged: pd.DataFrame) -> pd.DataFrame:
+    strategies = {
+        "model_only": "pred_label",
+        "rule_forced": "forced_pred_label",
+        "rule_abstain_as_error": "abstain_pred_label",
+        "hybrid_rule_first": "hybrid_pred_label",
+        "hybrid_rule_first_confidence_gate": "hybrid_uncertainty_gated_pred_label",
+    }
+    pairs = [
+        ("model_only", "hybrid_rule_first"),
+        ("model_only", "hybrid_rule_first_confidence_gate"),
+        ("rule_forced", "hybrid_rule_first"),
+        ("rule_abstain_as_error", "hybrid_rule_first_confidence_gate"),
+    ]
+    group_cols = [col for col in ["config_name", "exp_name", "seed", "prediction_file", "evaluation_mode", "task", "label_col"] if col in merged.columns]
+    rows = []
+    for base, sub in iter_groups(merged, group_cols):
+        true_label = sub["true_label"].astype(str)
+        for left_name, right_name in pairs:
+            left_correct = sub[strategies[left_name]].astype(str).eq(true_label)
+            right_correct = sub[strategies[right_name]].astype(str).eq(true_label)
+            b = int((left_correct & (~right_correct)).sum())
+            c = int(((~left_correct) & right_correct).sum())
+            rows.append({
+                **base,
+                "baseline_strategy": left_name,
+                "comparison_strategy": right_name,
+                "n": int(len(sub)),
+                "baseline_accuracy": float(left_correct.mean()) if len(sub) else math.nan,
+                "comparison_accuracy": float(right_correct.mean()) if len(sub) else math.nan,
+                "paired_accuracy_delta": float(right_correct.mean() - left_correct.mean()) if len(sub) else math.nan,
+                "baseline_correct_comparison_wrong": b,
+                "baseline_wrong_comparison_correct": c,
+                "mcnemar_p_value": mcnemar_p_value(b, c),
+            })
+    return pd.DataFrame(rows)
+
+
 def build_main_hybrid_summary(summary: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFrame:
     group_cols = [
         col
@@ -281,6 +427,7 @@ def build_main_hybrid_summary(summary: pd.DataFrame, merged: pd.DataFrame) -> pd
                 row["hybrid_rule_rate"] = gated_rule_rate
                 row["hybrid_model_rate"] = gated_model_rate
                 row["low_confidence_abstain_rate"] = low_confidence_abstain_rate
+            row.update(compute_clinical_value_metrics(sub, strategy))
             rate_rows.append(row)
 
     rates = pd.DataFrame(rate_rows)
@@ -301,11 +448,167 @@ def build_main_hybrid_summary(summary: pd.DataFrame, merged: pd.DataFrame) -> pd
         "hybrid_rule_rate",
         "hybrid_model_rate",
         "low_confidence_abstain_rate",
+        "rule_available_rate",
+        "rule_correct_when_available_rate",
+        "rule_failure_rate",
+        "rule_correction_rate",
+        "model_fallback_success_rate",
+        "rule_model_conflict_rate",
+        "warning_rate",
     ]
     output_cols = [col for col in output_cols if col in pivot.columns]
     return pivot[output_cols]
 
 
+
+def build_method_comparison_summary(main_summary: pd.DataFrame) -> pd.DataFrame:
+    if main_summary.empty or "strategy" not in main_summary.columns:
+        return pd.DataFrame()
+    group_cols = [col for col in ["evaluation_mode", "strategy"] if col in main_summary.columns]
+    if "strategy" not in group_cols:
+        group_cols.append("strategy")
+    metric_cols = [
+        col for col in [
+            "Task1_macro_f1", "Task2_macro_f1", "Task3_macro_f1", "mean_macro_f1",
+            "coverage", "abstain_rate", "hybrid_rule_rate", "hybrid_model_rate",
+            "low_confidence_abstain_rate", "rule_available_rate",
+            "rule_correct_when_available_rate", "rule_failure_rate", "rule_correction_rate",
+            "model_fallback_success_rate", "rule_model_conflict_rate", "warning_rate",
+        ] if col in main_summary.columns
+    ]
+    rows = []
+    for key, sub in main_summary.groupby(group_cols, dropna=False):
+        key_tuple = key if isinstance(key, tuple) else (key,)
+        row = dict(zip(group_cols, key_tuple))
+        row["n_profiles"] = int(len(sub))
+        for col in metric_cols:
+            values = pd.to_numeric(sub[col], errors="coerce")
+            row[f"{col}__mean"] = float(values.mean()) if values.notna().any() else math.nan
+            row[f"{col}__std"] = float(values.std(ddof=0)) if values.notna().any() else math.nan
+            row[f"{col}__min"] = float(values.min()) if values.notna().any() else math.nan
+            row[f"{col}__max"] = float(values.max()) if values.notna().any() else math.nan
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    strategy_order = {
+        "rule_decision": 0,
+        "rule_forced": 1,
+        "rule_abstain_as_error": 2,
+        "model_only": 3,
+        "hybrid_rule_first": 4,
+        "hybrid_rule_first_confidence_gate": 5,
+    }
+    out["strategy_order"] = out["strategy"].map(strategy_order).fillna(99)
+    sort_cols = [col for col in ["evaluation_mode", "strategy_order"] if col in out.columns]
+    out = out.sort_values(sort_cols).drop(columns=["strategy_order"]).reset_index(drop=True)
+    return out
+def build_rule_contribution_summary(merged: pd.DataFrame) -> pd.DataFrame:
+    if merged.empty:
+        return pd.DataFrame()
+    group_cols = [
+        col
+        for col in ["config_name", "exp_name", "seed", "prediction_file", "evaluation_mode", "task", "label_col"]
+        if col in merged.columns
+    ]
+    rows = []
+    for base, sub in iter_groups(merged, group_cols):
+        rule_available = available_label_mask(sub.get("forced_pred_label", pd.Series("", index=sub.index)))
+        rule_covered = sub.get("baseline_covered", pd.Series(False, index=sub.index)).fillna(False).astype(bool)
+        abstain_pred = sub.get(
+            "abstain_pred_label",
+            pd.Series(INSUFFICIENT_EVIDENCE_LABEL, index=sub.index),
+        ).fillna(INSUFFICIENT_EVIDENCE_LABEL).astype(str)
+        warning_mask = non_empty_text_mask(sub.get("warning_reasons", pd.Series("", index=sub.index)))
+        true_label = sub["true_label"].astype(str)
+        forced_pred = sub["forced_pred_label"].fillna(INSUFFICIENT_EVIDENCE_LABEL).astype(str)
+        row = {
+            **base,
+            "n": int(len(sub)),
+            "rule_available_rate": _safe_rate(rule_available),
+            "rule_coverage_rate": _safe_rate(rule_covered),
+            "rule_abstain_rate": _safe_rate(abstain_pred.eq(INSUFFICIENT_EVIDENCE_LABEL)),
+            "warning_rate": _safe_rate(warning_mask),
+            "mean_rule_confidence": float(pd.to_numeric(sub.get("rule_confidence", pd.Series(np.nan, index=sub.index)), errors="coerce").mean()),
+            "mean_rule_evidence_score": float(pd.to_numeric(sub.get("rule_evidence_score", pd.Series(np.nan, index=sub.index)), errors="coerce").mean()),
+        }
+        row.update({
+            f"rule_forced_{key}": value
+            for key, value in metric_dict(true_label, forced_pred).items()
+            if key != "labels"
+        })
+        row.update({
+            f"rule_abstain_as_error_{key}": value
+            for key, value in metric_dict(true_label, abstain_pred).items()
+            if key != "labels"
+        })
+        if bool(rule_covered.any()):
+            covered_metrics = metric_dict(true_label[rule_covered], forced_pred[rule_covered])
+            row.update({
+                f"rule_covered_only_{key}": value
+                for key, value in covered_metrics.items()
+                if key != "labels"
+            })
+        else:
+            row.update({
+                "rule_covered_only_n": 0,
+                "rule_covered_only_accuracy": math.nan,
+                "rule_covered_only_macro_f1": math.nan,
+                "rule_covered_only_balanced_accuracy": math.nan,
+            })
+        row.update(compute_clinical_value_metrics(sub, "hybrid_rule_first"))
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    sort_cols = [col for col in group_cols if col in out.columns]
+    return out.sort_values(sort_cols).reset_index(drop=True)
+
+
+def build_hybrid_explainability_summary(merged: pd.DataFrame) -> pd.DataFrame:
+    if merged.empty or "hybrid_decision_reason" not in merged.columns:
+        return pd.DataFrame()
+    group_cols = [
+        col
+        for col in [
+            "config_name", "exp_name", "seed", "prediction_file", "evaluation_mode",
+            "task", "label_col", "hybrid_decision_reason",
+        ]
+        if col in merged.columns
+    ]
+    rows = []
+    for base, sub in iter_groups(merged, group_cols):
+        true_label = sub["true_label"].astype(str)
+        hybrid_pred = sub["hybrid_pred_label"].fillna(INSUFFICIENT_EVIDENCE_LABEL).astype(str)
+        model_pred = sub["pred_label"].astype(str)
+        rule_pred = sub.get("forced_pred_label", pd.Series(INSUFFICIENT_EVIDENCE_LABEL, index=sub.index)).fillna(INSUFFICIENT_EVIDENCE_LABEL).astype(str)
+        rule_available = available_label_mask(rule_pred)
+        warning_mask = non_empty_text_mask(sub.get("hybrid_warning_reasons", sub.get("warning_reasons", pd.Series("", index=sub.index))))
+        metrics = metric_dict(true_label, hybrid_pred)
+        row = {
+            **base,
+            "n": int(len(sub)),
+            "hybrid_accuracy": metrics["accuracy"],
+            "hybrid_macro_f1": metrics["macro_f1"],
+            "hybrid_balanced_accuracy": metrics["balanced_accuracy"],
+            "model_correct_rate": float(model_pred.eq(true_label).mean()) if len(sub) else math.nan,
+            "rule_correct_when_available_rate": _safe_rate(rule_available & rule_pred.eq(true_label), rule_available),
+            "hybrid_used_rule_rate": float(sub.get("hybrid_used_rule", pd.Series(False, index=sub.index)).fillna(False).astype(bool).mean()),
+            "hybrid_used_model_rate": float(sub.get("hybrid_used_model", pd.Series(False, index=sub.index)).fillna(False).astype(bool).mean()),
+            "low_confidence_abstain_rate": float(sub.get("hybrid_low_confidence_abstain", pd.Series(False, index=sub.index)).fillna(False).astype(bool).mean()),
+            "rule_model_conflict_rate": _safe_rate(rule_available & rule_pred.ne(model_pred)),
+            "warning_rate": _safe_rate(warning_mask),
+            "mean_rule_confidence": float(pd.to_numeric(sub.get("rule_confidence", pd.Series(np.nan, index=sub.index)), errors="coerce").mean()),
+            "mean_rule_evidence_score": float(pd.to_numeric(sub.get("rule_evidence_score", pd.Series(np.nan, index=sub.index)), errors="coerce").mean()),
+            "mean_model_confidence": float(pd.to_numeric(sub.get("hybrid_model_confidence", pd.Series(np.nan, index=sub.index)), errors="coerce").mean()),
+        }
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    total_cols = [col for col in group_cols if col != "hybrid_decision_reason"]
+    out["reason_fraction"] = out["n"] / out.groupby(total_cols, dropna=False)["n"].transform("sum")
+    return out.sort_values(total_cols + ["n"], ascending=[True] * len(total_cols) + [False]).reset_index(drop=True)
 def build_decision_reason_summary(merged: pd.DataFrame) -> pd.DataFrame:
     if merged.empty or "hybrid_decision_reason" not in merged.columns:
         return pd.DataFrame()
@@ -348,6 +651,15 @@ def run(args):
     summary = summarize(merged)
     main_summary = build_main_hybrid_summary(summary, merged)
     reason_summary = build_decision_reason_summary(merged)
+    rule_contribution_summary = build_rule_contribution_summary(merged)
+    hybrid_explainability_summary = build_hybrid_explainability_summary(merged)
+    method_comparison_summary = build_method_comparison_summary(main_summary)
+    threshold_sweep = build_threshold_sweep(
+        merged,
+        parse_threshold_list(args.rule_thresholds),
+        parse_threshold_list(args.model_thresholds),
+    ) if args.threshold_sweep else pd.DataFrame()
+    mcnemar_tests = build_strategy_mcnemar_tests(merged)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -362,11 +674,32 @@ def run(args):
     main_summary_path = paper_tables_dir / (
         "main_hybrid_summary_locked_test.csv" if locked_mode else "main_hybrid_summary.csv"
     )
+    rule_contribution_path = paper_tables_dir / (
+        "rule_contribution_summary_locked_test.csv" if locked_mode else "rule_contribution_summary.csv"
+    )
+    hybrid_explainability_path = paper_tables_dir / (
+        "hybrid_explainability_summary_locked_test.csv" if locked_mode else "hybrid_explainability_summary.csv"
+    )
+    method_comparison_path = paper_tables_dir / (
+        "main_method_comparison_locked_test.csv" if locked_mode else "main_method_comparison_no_support.csv"
+    )
+    threshold_sweep_path = out_dir / (
+        "hybrid_threshold_sweep_locked_test.csv" if locked_mode else "hybrid_threshold_sweep.csv"
+    )
+    mcnemar_path = out_dir / (
+        "hybrid_strategy_mcnemar_locked_test.csv" if locked_mode else "hybrid_strategy_mcnemar.csv"
+    )
     manifest_path = out_dir / "hybrid_manifest.json"
     merged.to_csv(pred_path, index=False, encoding="utf-8-sig")
     summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
     reason_summary.to_csv(reason_summary_path, index=False, encoding="utf-8-sig")
     main_summary.to_csv(main_summary_path, index=False, encoding="utf-8-sig")
+    rule_contribution_summary.to_csv(rule_contribution_path, index=False, encoding="utf-8-sig")
+    hybrid_explainability_summary.to_csv(hybrid_explainability_path, index=False, encoding="utf-8-sig")
+    method_comparison_summary.to_csv(method_comparison_path, index=False, encoding="utf-8-sig")
+    mcnemar_tests.to_csv(mcnemar_path, index=False, encoding="utf-8-sig")
+    if not threshold_sweep.empty:
+        threshold_sweep.to_csv(threshold_sweep_path, index=False, encoding="utf-8-sig")
     manifest = {
         "results_dir": args.results_dir,
         "mode": args.mode,
@@ -374,11 +707,19 @@ def run(args):
         "rule_predictions": args.rule_predictions,
         "rule_confidence_threshold": args.rule_confidence_threshold,
         "model_confidence_threshold": args.model_confidence_threshold,
+        "threshold_sweep_enabled": bool(args.threshold_sweep),
+        "rule_thresholds": args.rule_thresholds,
+        "model_thresholds": args.model_thresholds,
         "outputs": {
             "predictions": str(pred_path),
             "summary": str(summary_path),
             "decision_reason_summary": str(reason_summary_path),
             "main_summary": str(main_summary_path),
+            "rule_contribution_summary": str(rule_contribution_path),
+            "hybrid_explainability_summary": str(hybrid_explainability_path),
+            "method_comparison_summary": str(method_comparison_path),
+            "threshold_sweep": str(threshold_sweep_path) if args.threshold_sweep else None,
+            "strategy_mcnemar": str(mcnemar_path),
             "locked_summary": str(summary_path) if locked_mode else None,
             "locked_main_summary": str(main_summary_path) if locked_mode else None,
         },
@@ -388,7 +729,7 @@ def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare model-only, rule-only, and rule+model hybrid outputs.")
+    parser = argparse.ArgumentParser(description="Compare neural, clinical-rule, and hybrid decision-support outputs.")
     parser.add_argument("--results_dir", default="results_v74")
     parser.add_argument("--rule_predictions", default="results_v74/rule_baselines_phase3/rule_baseline_predictions.csv")
     parser.add_argument("--model_predictions_file", default="", help="Optional existing model or hybrid prediction CSV to recompute rule/hybrid columns.")
@@ -397,6 +738,9 @@ def main():
     parser.add_argument("--mode", default="no_support", choices=["configured", "no_support", "locked_test", "both", "all"])
     parser.add_argument("--rule_confidence_threshold", type=float, default=0.8)
     parser.add_argument("--model_confidence_threshold", type=float, default=0.6)
+    parser.add_argument("--threshold_sweep", action="store_true", help="Export a grid search over rule/model confidence thresholds.")
+    parser.add_argument("--rule_thresholds", default="0.5,0.6,0.7,0.8,0.9,0.95")
+    parser.add_argument("--model_thresholds", default="0.4,0.5,0.6,0.7,0.8,0.9")
     args = parser.parse_args()
     summary = run(args)
     print(summary.head(30).to_string(index=False))

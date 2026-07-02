@@ -302,7 +302,7 @@ def export_confusion_matrices(
 
 def export_confusion_matrices_from_prediction_rows(
     prediction_rows_path: Path,
-    paper_dir: Path,
+    runs_paper_dir: Path,
     heatmap_mode: str,
     chunksize: int = 200_000,
 ):
@@ -391,7 +391,7 @@ def export_confusion_matrices_from_prediction_rows(
         for (true_label, pred_label), n in pair_counts.items():
             cm[label_to_idx[true_label], label_to_idx[pred_label]] += n
 
-        figs_dir = paper_dir / safe_name(config_name) / "figs"
+        figs_dir = runs_paper_dir / safe_name(config_name) / "figs"
         figs_dir.mkdir(parents=True, exist_ok=True)
         out_path = figs_dir / f"cm_{safe_name(exp_name)}_seed{seed}_{task_name}_{safe_name(label_col)}{suffix}.png"
         save_heatmap(
@@ -400,7 +400,7 @@ def export_confusion_matrices_from_prediction_rows(
             f"{exp_name} seed {seed} - {task_name} {label_col} ({title_suffix})",
             labels=labels,
         )
-        generated.append(str(out_path.relative_to(paper_dir)))
+        generated.append(str(out_path.relative_to(runs_paper_dir)))
     return generated
 
 
@@ -589,6 +589,18 @@ def export_one_result_dir(results_dir: Path, paper_dir: Path, heatmap_mode: str 
     }
 
 
+def bootstrap_mean_ci(values: pd.Series, *, n_bootstrap: int = 500, seed: int = 74) -> tuple[float, float]:
+    arr = pd.to_numeric(values, errors="coerce").dropna().to_numpy(dtype=float)
+    if arr.size == 0:
+        return (np.nan, np.nan)
+    if arr.size == 1:
+        return (float(arr[0]), float(arr[0]))
+    rng = np.random.default_rng(seed)
+    sample_idx = rng.integers(0, arr.size, size=(n_bootstrap, arr.size))
+    boot_means = arr[sample_idx].mean(axis=1)
+    return (float(np.percentile(boot_means, 2.5)), float(np.percentile(boot_means, 97.5)))
+
+
 def build_statistical_summary(collected: dict[str, list[pd.DataFrame]]) -> pd.DataFrame:
     source_map = {
         "all_runs": "configured",
@@ -596,52 +608,93 @@ def build_statistical_summary(collected: dict[str, list[pd.DataFrame]]) -> pd.Da
         "all_runs_locked_test_no_support": "locked_test_no_support",
     }
     metric_cols = ["accuracy", "macro_f1", "balanced_accuracy"]
+    wide_metric_map = {
+        "acc": "accuracy",
+        "macro_f1": "macro_f1",
+        "balanced_acc": "balanced_accuracy",
+    }
+    wide_metric_re = re.compile(
+        r"^(?P<task>Task\d+)__(?P<label_col>.+?)_(?P<metric>balanced_acc|macro_f1|acc)$"
+    )
     rows = []
+
+    def add_summary_row(base: dict, evaluation_scope: str, metric: str, values: pd.Series):
+        values = pd.to_numeric(values, errors="coerce").dropna()
+        if values.empty:
+            return
+        n = int(len(values))
+        std = float(values.std(ddof=1)) if n > 1 else 0.0
+        sem = float(std / np.sqrt(n)) if n > 0 else np.nan
+        ci95_half_width = float(1.96 * sem) if np.isfinite(sem) else np.nan
+        mean_value = float(values.mean())
+        ci_low = mean_value - ci95_half_width if np.isfinite(ci95_half_width) else np.nan
+        ci_high = mean_value + ci95_half_width if np.isfinite(ci95_half_width) else np.nan
+        bootstrap_low, bootstrap_high = bootstrap_mean_ci(values, seed=74 + len(rows))
+        rows.append({
+            **base,
+            "evaluation_scope": evaluation_scope,
+            "metric": metric,
+            "n": n,
+            "mean": mean_value,
+            "std": std,
+            "sem": sem,
+            "ci95_low": float(np.clip(ci_low, 0.0, 1.0)) if np.isfinite(ci_low) else np.nan,
+            "ci95_high": float(np.clip(ci_high, 0.0, 1.0)) if np.isfinite(ci_high) else np.nan,
+            "ci95_half_width": ci95_half_width,
+            "bootstrap_ci95_low": float(np.clip(bootstrap_low, 0.0, 1.0)) if np.isfinite(bootstrap_low) else np.nan,
+            "bootstrap_ci95_high": float(np.clip(bootstrap_high, 0.0, 1.0)) if np.isfinite(bootstrap_high) else np.nan,
+            "bootstrap_n": 500,
+        })
+
     for source_key, evaluation_scope in source_map.items():
         frames = collected.get(source_key) or []
         if not frames:
             continue
         df = pd.concat(frames, ignore_index=True)
-        group_cols = [
+
+        long_group_cols = [
             col for col in ["config_name", "exp_name", "task", "label_col"]
             if col in df.columns
         ]
-        if not group_cols:
+        if {"task", "label_col"}.issubset(df.columns):
+            for key, sub in df.groupby(long_group_cols, dropna=False):
+                key_tuple = key if isinstance(key, tuple) else (key,)
+                base = dict(zip(long_group_cols, key_tuple))
+                for metric in metric_cols:
+                    if metric in sub.columns:
+                        add_summary_row(base, evaluation_scope, metric, sub[metric])
+
+        wide_metric_cols = []
+        for col in df.columns:
+            match = wide_metric_re.match(str(col))
+            if match:
+                wide_metric_cols.append((col, match.groupdict()))
+        if not wide_metric_cols:
             continue
-        for key, sub in df.groupby(group_cols, dropna=False):
+
+        wide_group_cols = [col for col in ["config_name", "exp_name"] if col in df.columns]
+        grouped = df.groupby(wide_group_cols, dropna=False) if wide_group_cols else [((), df)]
+        for key, sub in grouped:
             key_tuple = key if isinstance(key, tuple) else (key,)
-            base = dict(zip(group_cols, key_tuple))
-            for metric in metric_cols:
-                if metric not in sub.columns:
-                    continue
-                values = pd.to_numeric(sub[metric], errors="coerce").dropna()
-                if values.empty:
-                    continue
-                n = int(len(values))
-                std = float(values.std(ddof=1)) if n > 1 else 0.0
-                sem = float(std / np.sqrt(n)) if n > 0 else np.nan
-                ci95_half_width = float(1.96 * sem) if np.isfinite(sem) else np.nan
-                mean_value = float(values.mean())
-                ci_low = mean_value - ci95_half_width if np.isfinite(ci95_half_width) else np.nan
-                ci_high = mean_value + ci95_half_width if np.isfinite(ci95_half_width) else np.nan
-                rows.append({
-                    **base,
-                    "evaluation_scope": evaluation_scope,
-                    "metric": metric,
-                    "n": n,
-                    "mean": mean_value,
-                    "std": std,
-                    "sem": sem,
-                    "ci95_low": float(np.clip(ci_low, 0.0, 1.0)) if np.isfinite(ci_low) else np.nan,
-                    "ci95_high": float(np.clip(ci_high, 0.0, 1.0)) if np.isfinite(ci_high) else np.nan,
-                    "ci95_half_width": ci95_half_width,
-                })
+            group_base = dict(zip(wide_group_cols, key_tuple))
+            for col, parsed in wide_metric_cols:
+                base = {
+                    **group_base,
+                    "task": parsed["task"],
+                    "label_col": parsed["label_col"],
+                }
+                add_summary_row(
+                    base,
+                    evaluation_scope,
+                    wide_metric_map[parsed["metric"]],
+                    sub[col],
+                )
+
     out = pd.DataFrame(rows)
     if out.empty:
         return out
     sort_cols = [col for col in ["evaluation_scope", "config_name", "exp_name", "task", "label_col", "metric"] if col in out.columns]
     return out.sort_values(sort_cols).reset_index(drop=True)
-
 
 def export_multi_result_dir(results_dir: Path, paper_dir: Path, heatmap_mode: str):
     runs_root = results_dir / "five_runs"
@@ -649,7 +702,9 @@ def export_multi_result_dir(results_dir: Path, paper_dir: Path, heatmap_mode: st
         raise FileNotFoundError(f"Missing multi-run directory: {runs_root}")
 
     root_tables = paper_dir / "tables"
+    runs_paper_dir = paper_dir / "five_runs"
     root_tables.mkdir(parents=True, exist_ok=True)
+    runs_paper_dir.mkdir(parents=True, exist_ok=True)
     copy_if_exists(runs_root / "run_configs.csv", root_tables / "run_configs.csv")
 
     collected = {
@@ -666,7 +721,7 @@ def export_multi_result_dir(results_dir: Path, paper_dir: Path, heatmap_mode: st
     }
     for run_dir in sorted(p for p in runs_root.iterdir() if p.is_dir()):
         try:
-            exported = export_one_result_dir(run_dir, paper_dir / run_dir.name, heatmap_mode=heatmap_mode)
+            exported = export_one_result_dir(run_dir, runs_paper_dir / run_dir.name, heatmap_mode=heatmap_mode)
         except FileNotFoundError as exc:
             print(f"[WARN] Skip incomplete result dir: {exc}")
             continue
@@ -692,17 +747,19 @@ def export_multi_result_dir(results_dir: Path, paper_dir: Path, heatmap_mode: st
 
     generated_prediction_heatmaps = export_confusion_matrices_from_prediction_rows(
         paper_dir / "error_analysis" / "prediction_rows_all.csv",
-        paper_dir,
+        runs_paper_dir,
         heatmap_mode,
     )
     if generated_prediction_heatmaps:
-        refresh_run_fig_manifests(paper_dir)
+        refresh_run_fig_manifests(runs_paper_dir)
 
     manifest = {
         "results_dir": str(results_dir.resolve()),
         "runs_root": str(runs_root.resolve()),
         "paper_dir": str(paper_dir.resolve()),
+        "runs_output_dir": str(runs_paper_dir.resolve()),
         "run_dirs": sorted(p.name for p in runs_root.iterdir() if p.is_dir()),
+        "run_paper_dirs": sorted(p.name for p in runs_paper_dir.iterdir() if p.is_dir()),
         "generated_tables": sorted([p.name for p in root_tables.glob("*")]),
         "generated_prediction_heatmaps": sorted(generated_prediction_heatmaps),
     }

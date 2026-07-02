@@ -1,17 +1,3 @@
-<!-- 2026-07-01-inline-run-configs -->
-
-## 2026-07-01 目前參數設定狀態
-
-本專案已取消外部參數檔。正式訓練參數集中在 `train_v74.py` 內維護：
-
-- `MODEL_SIZE_CONFIGS`：base / small / tiny 的模型大小設定。
-- `MISSING_AUG_PROFILES`：Task1、Task2、Task3 的缺失資料 augmentation 權重。
-- `RUN_CONFIGS`：15 組正式訓練參數。
-- `ABLATION_RUN_CONFIGS`：5 組 ablation 參數。
-
-`train_v74.py` 仍使用 `--config_preset recommended|ablation|all` 選擇要跑正式組、ablation 組或全部 20 組。`run_all_v74.py` 與 `run_locked_test_v74.py` 不再接受外部參數檔路徑。若要改參數或分電腦跑，請直接在同一套程式的 `train_v74.py` 內調整參數組合或自行改要執行的 config，不再使用外部分工檔。同步程式也不再同步舊 config 目錄，正式封包中的舊 config 目錄已清除。
-
-<!-- /2026-07-01-inline-run-configs -->
 # 輸出檔案 Label 與欄位意義說明
 
 <!-- 2026-06-27-narrative-alignment -->
@@ -50,10 +36,11 @@ for ear-level hearing classification under incomplete audiological evidence.
 - Task2/Task3 資料來源：`task2_3_pure_data(6_24).xlsx`。
 - 目前特徵數：Task1 = 5、Task2 = 36、Task3 = 16、三任務 union = 53。
 - Task2 模型輸入包含 AC 500/1000/2000/4000/6000/8000 Hz、六頻 AC NR 標記、BC 500/1000/2000/4000 Hz、BC NR/缺失標記、ABG 500/1000/2000/4000 Hz 的 數值/缺失/截尾 標記。
-- Task2 規則使用 AC 500/1000/2000/4000 Hz 加上 6000/8000 Hz 至少一個高頻存在作為完整性條件；ABG 以 `abs(AC-BC)>=10 dB` 判定 clear ABG，`8<=ABG<10 dB` 作邊界警示。
+- Task2 規則使用 AC 500/1000/2000/4000 Hz 加上 6000/8000 Hz 至少一個高頻存在作為完整性條件；ABG 以 `abs(AC-BC)>10 dB` 判定，8-10 dB 只作 邊界警示。
 - Task3 規則：`peak_daPa <= -300` 判 B，`-300 < peak_daPa <= -150` 判 C 且 信心度較低，`peak_daPa > -150` 判 A；NP peak 加 NP compliance 判 B。
-- 混合式決策 規則優先 改以 `rule_confidence` / `rule_evidence_score` 達門檻且 rule label 存在時採用規則；否則使用模型，若模型信心度低於門檻則可暫不判讀。
-- `train_v74.py 內建 RUN_CONFIGS/ABLATION_RUN_CONFIGS` 為完整 20 組設定：15 組 `run_configs` 加 5 組 `ablation_run_configs`。
+- 混合式決策 規則優先 只有在 `complete_for_rule=True`、`baseline_covered=True` 且 `rule_confidence` 達門檻時採用規則；否則使用模型，若模型信心度低於門檻則可暫不判讀。
+- `configs/run_configs_v74.json` 為完整 20 組設定：15 組 `run_configs` 加 5 組 `ablation_run_configs`。
+- `configs/splits/run_configs_v74_part_A.json` 與 `configs/splits/run_configs_v74_part_B.json` 各選 10 組，供兩台電腦分工訓練；沒有 A/B 自動回退。
 - `all/` 預設是給 GPT/教授分析的 `analysis_only` 封包；可用 `--include-raw-data` 納入目前使用的原始資料，但未包含 checkpoint 與大型逐列預測 時仍不是完整可重跑 封包。
 - 本輪 邊緣端/model profile 仍可用 `--skip-model-profile` 延後，不作為目前主流程必跑項。
 新增或目前重要欄位：
@@ -562,33 +549,3 @@ all/sync_manifest_v74.json
 
 Task1 的人工缺失是將對應 AC/PTA 欄位設為缺失值後再進入既有 preprocessing；它用來對齊訓練端 feature masking。這和 Task2/Task3 的顯式 missing/NR/NP 旗標不同，解讀時要分開描述。
 <!-- /2026-07-01-task1-missingness-alignment -->
-## 2026-07-02 最新規則更新：Rule Evidence Score 與 Hybrid Gating
-
-- Task2 clear ABG 現在定義為 `abs(AC-BC) >= 10 dB`。
-- Task2 borderline ABG 現在定義為 `8 <= abs(AC-BC) < 10 dB`；borderline 不直接觸發 CHL/MHL，只扣 rule evidence score 0.1 並加上 `abg_borderline` warning。
-- Task2 的 `rule_forced` 仍保留硬判 label；但正式 rule-first / hybrid 是否採用 rule，改由 `rule_confidence` / `rule_evidence_score` 門檻控制。
-- Task2 score 起始為 1.0：缺 core AC 扣 0.15；6000/8000 兩者都缺扣 0.05；BC 部分缺失整組扣 0.3；no BC data 直接壓到 0.5；NR/censored 只加 warning，不當 missing。
-- Task3 evidence score 納入 `tymp_Vea` 缺失檢查；Vea 缺失只扣 0.05 並加 warning，不直接改 A/B/C label。
-- Task3 `peak_daPa` 缺失時 score 最高 0.5；`peak NP + compliance NP` 視為有效 B 型證據；`-300 < peak_daPa <= -150` 為 C 區間但扣 0.2，並保留 C/B compatible label。
-- Hybrid rule-first 現在使用 score gating：`rule_confidence >= 0.8` 且 rule label 存在時採用 rule；score 不足時 fallback model；model confidence 低於門檻時可輸出 `INSUFFICIENT_EVIDENCE`。
-- 新增或保留的輸出欄位包含 `rule_evidence_score`、`score_deductions`、`rule_confidence`、`warning_reasons`、`hybrid_decision_reason`。
-- 注意：依目前資料暫存檢查，`ABG>=10` 搭配「任一頻率有 clear ABG 即判 CHL/MHL」會明顯拉低 Task2 rule-forced 表現；這是規則定義的結果，不是流程錯誤，後續若要改善需再討論是否加入「至少兩個非 censored ABG 頻率」等條件。
-## 2026-07-02 新增輸出檔案與欄位意義
-
-### Rule / Hybrid 類
-- rule_contribution_summary*.csv：rule_available_rate 代表 rule 可產生有效 label 的比例；rule_coverage_rate 代表 rule evidence score 達到 rule-first 門檻的比例；rule_correction_rate 代表 rule 修正 model 錯誤的比例；model_fallback_success_rate 代表 fallback 給 model 後 model 正確的比例；warning_rate 代表該群組中有 clinical warning 或低信心 warning 的比例。
-- hybrid_explainability_summary*.csv：decision_reason 說明 hybrid 採用 rule 或 model 的原因，例如 rule_score_ge_threshold、rule_score_ge_threshold_with_warning、model_fallback_low_rule_score、model_fallback_no_rule_prediction、abstain_low_model_confidence。
-- main_method_comparison*.csv：將各 strategy 的 macro-F1、coverage、abstain、fallback、conflict、warning 做 mean/std/min/max 彙整，適合放入論文主比較表。
-
-### Missingness 類
-- missingness_degradation_summary.csv：以 complete data 為基準，計算不同人工缺失情境的 accuracy、macro-F1、sensitivity、specificity 下降量。
-- missingness_evidence_compensation_summary.csv：整理缺失情境、被移除證據、替代證據來源與各策略平均表現。
-- missingness_hybrid_reason_summary.csv：統計每種缺失情境下 hybrid decision reason 的比例與正確率。
-
-### Feature importance 類
-- feature_importance_summary.csv：整合 mean-mask ablation 與 permutation importance 的 feature group 重要性。
-- feature_group_importance_summary.csv：跨 importance source 彙整 feature group 的平均重要性與 within-task rank。
-- feature_missingness_link_summary.csv：將 feature group importance 與對應 artificial missingness scenario 的性能下降做連結。
-
-### Calibration 類
-- calibration_summary_paper*.csv：整理 accuracy、mean_confidence、confidence_accuracy_gap、calibration_direction、ECE、Brier score、selected threshold、coverage 與 abstain rate。

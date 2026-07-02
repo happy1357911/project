@@ -529,11 +529,79 @@ def build_feature_sets(data_dir: Path, feature_mode: str) -> Tuple[Dict[str, pd.
     return raw_dfs, feature_sets
 
 
+def sample_key_series(df: pd.DataFrame) -> pd.Series:
+    if "case_id" not in df.columns or "ear_side" not in df.columns:
+        raise KeyError("Locked-test split requires case_id and ear_side columns.")
+    return df["case_id"].astype(str) + "__" + df["ear_side"].astype(str)
+
+
+def load_split_manifest(path: str | Path | None) -> pd.DataFrame | None:
+    if not path:
+        return None
+    manifest_path = Path(path)
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Split manifest not found: {manifest_path}")
+    manifest = pd.read_csv(manifest_path)
+    required = {"task", "seed", "split", "sample_key"}
+    missing = required - set(manifest.columns)
+    if missing:
+        raise ValueError(f"Split manifest missing required columns: {sorted(missing)}")
+    manifest["sample_key"] = manifest["sample_key"].astype(str)
+    return manifest
+
+
+def split_dataframe_from_manifest(
+    df: pd.DataFrame,
+    task_name: str,
+    seed: int,
+    split_manifest: pd.DataFrame,
+    eval_mode: str,
+):
+    task_manifest = split_manifest[
+        (split_manifest["task"].astype(str) == task_name)
+        & (pd.to_numeric(split_manifest["seed"], errors="coerce") == int(seed))
+    ].copy()
+    if task_manifest.empty:
+        raise ValueError(f"No split-manifest rows for task={task_name}, seed={seed}")
+
+    if eval_mode == "locked_test":
+        train_splits = {"train", "val"}
+        eval_splits = {"test"}
+    else:
+        train_splits = {"train"}
+        eval_splits = {"val"}
+
+    work = df.copy()
+    work["_sample_key"] = sample_key_series(work)
+    train_keys = set(task_manifest.loc[task_manifest["split"].isin(train_splits), "sample_key"].astype(str))
+    eval_keys = set(task_manifest.loc[task_manifest["split"].isin(eval_splits), "sample_key"].astype(str))
+    train_df = work.loc[work["_sample_key"].isin(train_keys)].drop(columns=["_sample_key"]).copy()
+    eval_df = work.loc[work["_sample_key"].isin(eval_keys)].drop(columns=["_sample_key"]).copy()
+    if train_df.empty or eval_df.empty:
+        raise ValueError(
+            f"Manifest split produced empty train/eval data for task={task_name}, seed={seed}, eval_mode={eval_mode}"
+        )
+
+    overlap = train_keys & eval_keys
+    split_meta = {
+        "_split_source": "split_manifest",
+        "_evaluation_mode": eval_mode,
+        "_manifest_rows": int(len(task_manifest)),
+        "_manifest_train_keys": int(len(train_keys)),
+        "_manifest_eval_keys": int(len(eval_keys)),
+        "_matched_train_rows": int(len(train_df)),
+        "_matched_eval_rows": int(len(eval_df)),
+        "_train_eval_key_overlap": int(len(overlap)),
+    }
+    return train_df.reset_index(drop=True), eval_df.reset_index(drop=True), split_meta
+
 def prepare_split(
     raw_df: pd.DataFrame,
     task_name: str,
     feature_cols: List[str],
     seed: int,
+    eval_mode: str = "grouped",
+    split_manifest: pd.DataFrame | None = None,
 ):
     info = TASK_INFO[task_name]
     df = pad_and_clean(raw_df, feature_cols)
@@ -541,7 +609,16 @@ def prepare_split(
     if len(df) < 2:
         raise ValueError(f"{task_name} has too few rows after label cleaning: {len(df)}")
 
-    train_df, val_df, rare_summary = split_dataframe(df, task_name, seed)
+    if split_manifest is not None:
+        train_df, val_df, rare_summary = split_dataframe_from_manifest(
+            df,
+            task_name,
+            seed,
+            split_manifest,
+            "locked_test" if eval_mode == "locked_test" else "grouped",
+        )
+    else:
+        train_df, val_df, rare_summary = split_dataframe(df, task_name, seed)
     norm = compute_norm_meta(train_df, feature_cols)
     train_df_n = apply_norm(train_df, feature_cols, norm["mu"], norm["sigma"])
     val_df_n = apply_norm(val_df, feature_cols, norm["mu"], norm["sigma"])
@@ -561,6 +638,8 @@ def prepare_split(
         "feature_count": len(feature_cols),
         "train_n": int(len(train_df)),
         "val_n": int(len(val_df)),
+        "evaluation_mode": eval_mode,
+        "eval_split_name": "test" if eval_mode == "locked_test" else "val",
         "class_names": [str(name) for name in encoder.classes_],
         "train_class_counts": {
             str(k): int(v)
@@ -747,6 +826,9 @@ def run_ml_baselines(args):
     seeds = parse_seed_list(args.seeds)
     requested_models = parse_model_list(args.models)
     raw_dfs, feature_sets = build_feature_sets(data_dir, args.feature_mode)
+    split_manifest = load_split_manifest(args.split_manifest) if args.eval_mode == "locked_test" else None
+    if args.eval_mode == "locked_test" and split_manifest is None:
+        raise ValueError("--split-manifest is required when --eval-mode locked_test")
 
     summary_rows = []
     per_class_rows = []
@@ -765,6 +847,8 @@ def run_ml_baselines(args):
                 task_name,
                 feature_cols,
                 seed,
+                eval_mode=args.eval_mode,
+                split_manifest=split_manifest,
             )
             if len(np.unique(y_train)) < 2:
                 for model_name in models:
@@ -809,6 +893,8 @@ def run_ml_baselines(args):
                     "label_col": meta["label_col"],
                     "model": model_name,
                     "feature_mode": args.feature_mode,
+                    "evaluation_mode": meta["evaluation_mode"],
+                    "eval_split_name": meta["eval_split_name"],
                     "feature_count": meta["feature_count"],
                     "train_n": meta["train_n"],
                     "val_n": meta["val_n"],
@@ -827,6 +913,8 @@ def run_ml_baselines(args):
                         "label_col": meta["label_col"],
                         "model": model_name,
                         "feature_mode": args.feature_mode,
+                        "evaluation_mode": meta["evaluation_mode"],
+                        "eval_split_name": meta["eval_split_name"],
                         **row,
                     })
                 confusion_matrices.append({
@@ -835,6 +923,8 @@ def run_ml_baselines(args):
                     "label_col": meta["label_col"],
                     "model": model_name,
                     "feature_mode": args.feature_mode,
+                    "evaluation_mode": meta["evaluation_mode"],
+                    "eval_split_name": meta["eval_split_name"],
                     "class_names": meta["class_names"],
                     "matrix": cm,
                 })
@@ -843,13 +933,14 @@ def run_ml_baselines(args):
     per_class_df = pd.DataFrame(per_class_rows)
     skipped_df = pd.DataFrame(skipped_rows, columns=["seed", "task", "model", "reason"])
 
-    summary_path = output_dir / "ml_baseline_summary.csv"
-    per_class_path = output_dir / "ml_baseline_per_class.csv"
-    summary_5seed_path = output_dir / "ml_baseline_summary_5seed.csv"
-    per_class_5seed_path = output_dir / "ml_baseline_per_class_5seed.csv"
-    skipped_path = output_dir / "ml_baseline_skipped_models.csv"
-    cm_path = output_dir / "ml_baseline_confusion_matrices.json"
-    manifest_path = output_dir / "ml_baseline_manifest.json"
+    prefix = "ml_baseline_locked_test" if args.eval_mode == "locked_test" else "ml_baseline"
+    summary_path = output_dir / f"{prefix}_summary.csv"
+    per_class_path = output_dir / f"{prefix}_per_class.csv"
+    summary_5seed_path = output_dir / f"{prefix}_summary_5seed.csv"
+    per_class_5seed_path = output_dir / f"{prefix}_per_class_5seed.csv"
+    skipped_path = output_dir / f"{prefix}_skipped_models.csv"
+    cm_path = output_dir / f"{prefix}_confusion_matrices.json"
+    manifest_path = output_dir / f"{prefix}_manifest.json"
 
     summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
     per_class_df.to_csv(per_class_path, index=False, encoding="utf-8-sig")
@@ -864,7 +955,9 @@ def run_ml_baselines(args):
         "seeds": seeds,
         "models_requested": requested_models,
         "feature_mode": args.feature_mode,
-        "preprocessing_reference": "Mirrors train_v74.py ear-level preprocessing, grouped split, and z-score normalization without importing torch.",
+        "evaluation_mode": args.eval_mode,
+        "split_manifest": args.split_manifest if args.eval_mode == "locked_test" else None,
+        "preprocessing_reference": "Mirrors train_v74.py ear-level preprocessing, grouped/locked split, and z-score normalization without importing torch.",
         "quick": bool(args.quick),
         "files": {
             "summary": str(summary_path),
@@ -898,6 +991,8 @@ def main():
         default="all",
         help="Comma-separated model names or all. Supported: logistic_regression,random_forest,hist_gradient_boosting,mlp,xgboost,lightgbm,catboost.",
     )
+    parser.add_argument("--eval-mode", default="grouped", choices=["grouped", "locked_test"], help="grouped uses the internal grouped validation split; locked_test trains on manifest train+val and evaluates on manifest test.")
+    parser.add_argument("--split-manifest", default="", help="Split manifest CSV from split_protocol_v74.py; required for --eval-mode locked_test.")
     parser.add_argument("--quick", action="store_true", help="Use smaller models for smoke tests.")
     args = parser.parse_args()
 

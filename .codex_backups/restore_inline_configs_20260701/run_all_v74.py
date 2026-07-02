@@ -171,12 +171,6 @@ def verify_key_outputs(args: argparse.Namespace) -> None:
     assert_file_exists(paper_dir / "tables" / "statistical_summary_all_configs.csv")
     assert_file_exists(paper_dir / "tables" / "main_hybrid_summary.csv")
     assert_file_exists(paper_dir / "tables" / "main_hybrid_summary_locked_test.csv")
-    assert_file_exists(paper_dir / "tables" / "rule_contribution_summary.csv")
-    assert_file_exists(paper_dir / "tables" / "rule_contribution_summary_locked_test.csv")
-    assert_file_exists(paper_dir / "tables" / "hybrid_explainability_summary.csv")
-    assert_file_exists(paper_dir / "tables" / "hybrid_explainability_summary_locked_test.csv")
-    assert_file_exists(paper_dir / "tables" / "main_method_comparison_no_support.csv")
-    assert_file_exists(paper_dir / "tables" / "main_method_comparison_locked_test.csv")
     assert_file_exists(results_dir / "rule_baselines_phase3" / "rule_baseline_summary.csv")
     assert_file_exists(results_dir / "ml_baselines" / "ml_baseline_summary.csv")
     assert_file_exists(results_dir / "ml_baselines" / "ml_baseline_summary_5seed.csv")
@@ -194,24 +188,16 @@ def verify_key_outputs(args: argparse.Namespace) -> None:
         assert_file_exists(results_dir / "calibration_analysis" / "calibration_ece_bins.csv")
         assert_file_exists(results_dir / "calibration_analysis" / "confidence_threshold_curve.csv")
         assert_file_exists(results_dir / "calibration_analysis" / "calibration_policy_summary.csv")
-        assert_file_exists(results_dir / "calibration_analysis" / "calibration_summary_paper.csv")
-        assert_file_exists(paper_dir / "tables" / "calibration_summary_paper.csv")
         assert_file_exists(results_dir / "calibration_analysis_locked_test" / "calibration_summary.csv")
         assert_file_exists(results_dir / "calibration_analysis_locked_test" / "calibration_ece_bins.csv")
         assert_file_exists(results_dir / "calibration_analysis_locked_test" / "confidence_threshold_curve.csv")
         assert_file_exists(results_dir / "calibration_analysis_locked_test" / "calibration_policy_summary.csv")
-        assert_file_exists(results_dir / "calibration_analysis_locked_test" / "calibration_summary_paper.csv")
-        assert_file_exists(paper_dir / "tables" / "calibration_summary_paper_locked_test.csv")
     if args.skip_artificial_missingness:
         print("[INFO] Artificial missingness checks skipped because --skip-artificial-missingness is set.")
     else:
         assert_file_exists(results_dir / "artificial_missingness" / "artificial_missingness_summary.csv")
         assert_file_exists(results_dir / "artificial_missingness" / "artificial_missingness_degradation_summary.csv")
         assert_file_exists(results_dir / "artificial_missingness" / "evidence_compensation_summary.csv")
-        assert_file_exists(results_dir / "artificial_missingness" / "missingness_hybrid_reason_summary.csv")
-        assert_file_exists(paper_dir / "tables" / "missingness_degradation_summary.csv")
-        assert_file_exists(paper_dir / "tables" / "missingness_evidence_compensation_summary.csv")
-        assert_file_exists(paper_dir / "tables" / "missingness_hybrid_reason_summary.csv")
     if args.skip_feature_importance:
         print("[INFO] Feature-importance checks skipped because --skip-feature-importance is set.")
     else:
@@ -219,12 +205,6 @@ def verify_key_outputs(args: argparse.Namespace) -> None:
         assert_file_exists(results_dir / "feature_importance" / "feature_group_ablation_summary.csv")
         assert_file_exists(results_dir / "feature_importance" / "feature_group_permutation_importance.csv")
         assert_file_exists(results_dir / "feature_importance" / "feature_importance_manifest.json")
-        assert_file_exists(results_dir / "feature_importance" / "feature_importance_summary.csv")
-        assert_file_exists(results_dir / "feature_importance" / "feature_group_importance_summary.csv")
-        assert_file_exists(results_dir / "feature_importance" / "feature_missingness_link_summary.csv")
-        assert_file_exists(paper_dir / "tables" / "feature_importance_summary.csv")
-        assert_file_exists(paper_dir / "tables" / "feature_group_importance_summary.csv")
-        assert_file_exists(paper_dir / "tables" / "feature_missingness_link_summary.csv")
     if args.skip_model_profile:
         print("[INFO] Optional model/profile checks skipped because --skip-model-profile is set.")
     else:
@@ -321,6 +301,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--locked-paper-dir", default="paper_v74_locked_test")
     parser.add_argument("--seeds", default="0,1,2,3,4", help="Comma-separated seeds.")
     parser.add_argument("--config-preset", default="all", help="train_v74.py config preset.")
+    parser.add_argument("--run-config-file", default="configs/run_configs_v74.json", help="External JSON run config file passed to train_v74.py and locked-test training.")
     parser.add_argument("--experiments", default="full,no_meta,no_irl,single_task")
     parser.add_argument("--single-task-target", default="all")
     parser.add_argument("--heatmap-mode", default="seed0")
@@ -425,6 +406,8 @@ def main() -> int:
                     args.single_task_target,
                     "--config_preset",
                     args.config_preset,
+                    "--run_config_file",
+                    args.run_config_file,
                     "--locked_split_manifest",
                     str(split_manifest_path),
                 ],
@@ -580,10 +563,6 @@ def main() -> int:
                     "10",
                     "--thresholds",
                     "0.0,0.5,0.6,0.7,0.8,0.9,0.95",
-                    "--paper-tables-dir",
-                    str(Path(args.paper_dir) / "tables"),
-                    "--paper-summary-name",
-                    "calibration_summary_paper.csv",
                 ],
             ),
             args.dry_run,
@@ -600,10 +579,6 @@ def main() -> int:
                     str(Path(args.results_dir) / "calibration_analysis_locked_test"),
                     "--mode",
                     "locked_test",
-                    "--paper-tables-dir",
-                    str(Path(args.paper_dir) / "tables"),
-                    "--paper-summary-name",
-                    "calibration_summary_paper_locked_test.csv",
                     "--bins",
                     "10",
                     "--thresholds",
@@ -649,8 +624,6 @@ def main() -> int:
                     *analysis_checkpoint_args,
                     "--output-dir",
                     str(Path(args.results_dir) / "artificial_missingness"),
-                    "--paper-tables-dir",
-                    str(Path(args.paper_dir) / "tables"),
                     "--tasks",
                     "Task1,Task2,Task3",
                     "--batch-size",
@@ -678,10 +651,6 @@ def main() -> int:
                     *analysis_checkpoint_args,
                     "--output-dir",
                     str(Path(args.results_dir) / "feature_importance"),
-                    "--paper-tables-dir",
-                    str(Path(args.paper_dir) / "tables"),
-                    "--missingness-degradation",
-                    str(Path(args.results_dir) / "artificial_missingness" / "artificial_missingness_degradation_summary.csv"),
                     "--tasks",
                     "Task1,Task2,Task3",
                     "--batch-size",
@@ -746,6 +715,8 @@ def main() -> int:
             args.seeds,
             "--config-preset",
             args.config_preset,
+            "--run-config-file",
+            args.run_config_file,
             "--experiments",
             args.experiments,
             "--single-task-target",

@@ -621,6 +621,8 @@ def task1_evidence_status(row: Mapping) -> dict:
         "complete_for_rule": bool(has_pta),
         "has_missing": bool(not has_pta),
         "rule_confidence": 1.0 if has_pta else 0.0,
+        "rule_evidence_score": 1.0 if has_pta else 0.0,
+        "score_deductions": "",
         "warning_reasons": "" if has_pta else "no_pta_data",
     }
 
@@ -643,6 +645,8 @@ def task3_evidence_status(row: Mapping) -> dict:
         "has_np": bool(decision.evidence_status == "np_evidence"),
         "has_missing": bool("missing" in decision.evidence_status),
         "rule_confidence": float(decision.confidence),
+        "rule_evidence_score": float(decision.confidence),
+        "score_deductions": "",
         "warning_reasons": ";".join(decision.warning_flags),
     }
 
@@ -653,6 +657,8 @@ def evidence_status(task_name: str, row: Mapping) -> dict:
         "baseline_covered": bool(decision.covered),
         "complete_for_rule": bool(decision.covered),
         "rule_confidence": float(decision.confidence),
+        "rule_evidence_score": float(decision.confidence),
+        "score_deductions": "",
         "warning_reasons": ";".join(decision.warning_flags),
         "compatible_labels": "|".join(decision.compatible_labels),
     }

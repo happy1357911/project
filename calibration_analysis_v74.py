@@ -174,6 +174,72 @@ def threshold_curve(df: pd.DataFrame, thresholds: List[float]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def calibration_policy_summary(curve: pd.DataFrame, min_coverage: float = 0.5) -> pd.DataFrame:
+    if curve.empty:
+        return pd.DataFrame()
+    group_cols = [col for col in GROUP_COLS if col in curve.columns]
+    rows = []
+    for base, sub in iter_groups(curve, group_cols):
+        work = sub.copy()
+        work["coverage_ok"] = pd.to_numeric(work["coverage"], errors="coerce").ge(float(min_coverage))
+        candidates = work.loc[work["coverage_ok"]].copy()
+        if candidates.empty:
+            candidates = work.copy()
+            selection_note = "best_macro_f1_without_min_coverage"
+        else:
+            selection_note = "best_macro_f1_with_min_coverage"
+        candidates["macro_f1_sort"] = pd.to_numeric(candidates["macro_f1"], errors="coerce").fillna(-1.0)
+        candidates["coverage_sort"] = pd.to_numeric(candidates["coverage"], errors="coerce").fillna(-1.0)
+        selected = candidates.sort_values(["macro_f1_sort", "coverage_sort", "threshold"], ascending=[False, False, True]).iloc[0]
+        rows.append({
+            **base,
+            "policy_min_coverage": float(min_coverage),
+            "selected_threshold": float(selected["threshold"]),
+            "selected_macro_f1": float(selected["macro_f1"]) if pd.notna(selected["macro_f1"]) else np.nan,
+            "selected_accuracy": float(selected["accuracy"]) if pd.notna(selected["accuracy"]) else np.nan,
+            "selected_coverage": float(selected["coverage"]) if pd.notna(selected["coverage"]) else np.nan,
+            "selected_abstain_rate": float(selected["abstain_rate"]) if pd.notna(selected["abstain_rate"]) else np.nan,
+            "selected_mean_confidence": float(selected["mean_confidence"]) if pd.notna(selected["mean_confidence"]) else np.nan,
+            "selection_note": selection_note,
+        })
+    return pd.DataFrame(rows)
+
+
+def build_calibration_paper_summary(summary: pd.DataFrame, bins: pd.DataFrame, policy: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty:
+        return pd.DataFrame()
+    group_cols = [col for col in GROUP_COLS if col in summary.columns]
+    out = summary.copy()
+    if not bins.empty and "ece" in bins.columns:
+        ece_cols = [col for col in GROUP_COLS if col in bins.columns]
+        ece = bins.groupby(ece_cols, dropna=False)["ece"].max().reset_index()
+        merge_cols = [col for col in group_cols if col in ece.columns]
+        if merge_cols:
+            out = out.merge(ece, on=merge_cols, how="left")
+    if not policy.empty:
+        policy_cols = [
+            col for col in [
+                *GROUP_COLS, "policy_min_coverage", "selected_threshold", "selected_macro_f1",
+                "selected_accuracy", "selected_coverage", "selected_abstain_rate",
+                "selected_mean_confidence", "selection_note",
+            ] if col in policy.columns
+        ]
+        merge_cols = [col for col in group_cols if col in policy_cols]
+        if merge_cols:
+            out = out.merge(policy[policy_cols], on=merge_cols, how="left")
+    gap = pd.to_numeric(out.get("confidence_accuracy_gap", pd.Series(np.nan, index=out.index)), errors="coerce")
+    out["calibration_direction"] = np.select(
+        [gap.gt(0.05), gap.lt(-0.05)],
+        ["over_confident", "under_confident"],
+        default="roughly_calibrated",
+    )
+    leading = [
+        *group_cols, "n", "accuracy", "mean_confidence", "confidence_accuracy_gap",
+        "calibration_direction", "ece", "mean_brier_score", "selected_threshold",
+        "selected_macro_f1", "selected_coverage", "selected_abstain_rate", "selection_note",
+    ]
+    cols = [col for col in leading if col in out.columns] + [col for col in out.columns if col not in leading]
+    return out[cols]
 def validate_prediction_rows(df: pd.DataFrame, args) -> pd.DataFrame:
     if df.empty:
         raise FileNotFoundError(
@@ -206,14 +272,25 @@ def run(args):
     summary = calibration_summary(df)
     bins = ece_bins(df, args.bins)
     curve = threshold_curve(df, parse_thresholds(args.thresholds))
+    policy = calibration_policy_summary(curve, args.policy_min_coverage)
+    paper_summary = build_calibration_paper_summary(summary, bins, policy)
 
     summary_path = out_dir / "calibration_summary.csv"
     bins_path = out_dir / "calibration_ece_bins.csv"
     curve_path = out_dir / "confidence_threshold_curve.csv"
+    policy_path = out_dir / "calibration_policy_summary.csv"
+    paper_summary_path = out_dir / "calibration_summary_paper.csv"
     manifest_path = out_dir / "calibration_manifest.json"
     summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
     bins.to_csv(bins_path, index=False, encoding="utf-8-sig")
     curve.to_csv(curve_path, index=False, encoding="utf-8-sig")
+    policy.to_csv(policy_path, index=False, encoding="utf-8-sig")
+    paper_summary.to_csv(paper_summary_path, index=False, encoding="utf-8-sig")
+    if getattr(args, "paper_tables_dir", ""):
+        paper_tables_dir = Path(args.paper_tables_dir)
+        paper_tables_dir.mkdir(parents=True, exist_ok=True)
+        paper_name = args.paper_summary_name or ("calibration_summary_paper_locked_test.csv" if args.mode == "locked_test" else "calibration_summary_paper.csv")
+        paper_summary.to_csv(paper_tables_dir / paper_name, index=False, encoding="utf-8-sig")
     manifest = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "results_dir": args.results_dir,
@@ -221,15 +298,18 @@ def run(args):
         "mode": args.mode,
         "bins": args.bins,
         "thresholds": parse_thresholds(args.thresholds),
+        "policy_min_coverage": float(args.policy_min_coverage),
         "n_prediction_rows": int(len(df)),
         "outputs": {
             "summary": str(summary_path),
             "ece_bins": str(bins_path),
             "threshold_curve": str(curve_path),
+            "policy_summary": str(policy_path),
+            "paper_summary": str(paper_summary_path),
         },
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-    return summary, bins, curve, manifest
+    return summary, bins, curve, policy, paper_summary, manifest
 
 
 def main():
@@ -237,11 +317,14 @@ def main():
     parser.add_argument("--results_dir", default="results_v74")
     parser.add_argument("--prediction_rows", default="")
     parser.add_argument("--output_dir", default="results_v74/calibration_analysis")
+    parser.add_argument("--paper-tables-dir", default="", help="Optional paper_v74/tables directory for calibration_summary_paper*.csv.")
+    parser.add_argument("--paper-summary-name", default="", help="Optional output filename under --paper-tables-dir.")
     parser.add_argument("--mode", default="no_support", choices=["configured", "no_support", "locked_test", "both", "all"])
     parser.add_argument("--bins", type=int, default=10)
     parser.add_argument("--thresholds", default="0.0,0.5,0.6,0.7,0.8,0.9,0.95")
+    parser.add_argument("--policy-min-coverage", type=float, default=0.5)
     args = parser.parse_args()
-    summary, _, _, manifest = run(args)
+    summary, _, _, _, _, manifest = run(args)
     print(summary.head(30).to_string(index=False))
     print(json.dumps(manifest, indent=2, ensure_ascii=False))
 

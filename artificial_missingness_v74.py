@@ -33,6 +33,30 @@ SCENARIO_METADATA = {
             "fallback_evidence": "not_applicable",
             "clinical_question": "complete PTA baseline",
         },
+        "task1_no_pta": {
+            "scenario_family": "pta_missing",
+            "removed_evidence": "AC PTA summary",
+            "fallback_evidence": "frequency-specific AC thresholds",
+            "clinical_question": "robustness when PTA summary is unavailable",
+        },
+        "task1_no_high_freq": {
+            "scenario_family": "high_frequency_ac_missing",
+            "removed_evidence": "AC 2000/4000 Hz and PTA summary",
+            "fallback_evidence": "low-frequency AC thresholds",
+            "clinical_question": "robustness when high-frequency AC evidence is unavailable",
+        },
+        "task1_no_low_freq": {
+            "scenario_family": "low_frequency_ac_missing",
+            "removed_evidence": "AC 500/1000 Hz and PTA summary",
+            "fallback_evidence": "high-frequency AC thresholds",
+            "clinical_question": "robustness when low-frequency AC evidence is unavailable",
+        },
+        "task1_no_all_ac": {
+            "scenario_family": "all_ac_missing",
+            "removed_evidence": "all Task1 AC evidence",
+            "fallback_evidence": "missingness-imputed feature baseline only",
+            "clinical_question": "stress test when Task1 AC evidence is unavailable",
+        },
     },
     "Task2": {
         "none": {
@@ -151,6 +175,14 @@ def load_model(checkpoint_path: str, device: torch.device):
 
 
 def task_scenarios(task_name: str) -> list[str]:
+    if task_name == "Task1":
+        return [
+            "none",
+            "task1_no_pta",
+            "task1_no_high_freq",
+            "task1_no_low_freq",
+            "task1_no_all_ac",
+        ]
     if task_name == "Task2":
         return [
             "none",
@@ -178,6 +210,10 @@ def apply_artificial_missingness(df: pd.DataFrame, task_name: str, scenario: str
 
     # Backward-compatible aliases from the earlier smoke-test script.
     aliases = {
+        "task1_mask_pta": "task1_no_pta",
+        "task1_mask_high_freq": "task1_no_high_freq",
+        "task1_mask_low_freq": "task1_no_low_freq",
+        "task1_mask_all_ac": "task1_no_all_ac",
         "task2_drop_all_bc": "task2_no_bc",
         "task2_drop_bc_4000": "task2_partial_bc_4000",
         "task2_mask_ac_4000": "task2_ac_4000_missing",
@@ -187,6 +223,20 @@ def apply_artificial_missingness(df: pd.DataFrame, task_name: str, scenario: str
         "task3_drop_tymp_peak": "task3_no_peak",
     }
     scenario = aliases.get(scenario, scenario)
+
+    if task_name == "Task1":
+        if scenario == "task1_no_pta":
+            cols = ["ac_PTA"]
+        elif scenario == "task1_no_high_freq":
+            cols = ["ac_2000Hz", "ac_4000Hz", "ac_PTA"]
+        elif scenario == "task1_no_low_freq":
+            cols = ["ac_500Hz", "ac_1000Hz", "ac_PTA"]
+        elif scenario == "task1_no_all_ac":
+            cols = list(TASK_INFO["Task1"]["feature_cols"])
+        else:
+            cols = []
+        for col in cols:
+            out[col] = np.nan
 
     if task_name == "Task2":
         if scenario in {"task2_ac_only", "task2_no_bc"}:
@@ -445,6 +495,59 @@ def build_evidence_compensation_summary(degradation: pd.DataFrame) -> pd.DataFra
     return pd.DataFrame(rows).sort_values([col for col in ["task", "scenario", "strategy"] if col in group_cols]).reset_index(drop=True)
 
 
+def build_missingness_hybrid_reason_summary(predictions: pd.DataFrame) -> pd.DataFrame:
+    if predictions.empty:
+        return pd.DataFrame()
+    rows = []
+    policy_specs = [
+        ("hybrid_rule_first", "hybrid_decision_reason"),
+        ("hybrid_rule_first_confidence_gate", "hybrid_confidence_gate_decision_reason"),
+    ]
+    for strategy, reason_col in policy_specs:
+        if reason_col not in predictions.columns:
+            continue
+        sub = predictions[predictions["strategy"].astype(str).eq(strategy)].copy()
+        if sub.empty:
+            continue
+        for col in SCENARIO_METADATA_COLUMNS:
+            sub[col] = [
+                scenario_metadata(str(row.get("task")), str(row.get("scenario"))).get(col, "unknown")
+                for _, row in sub.iterrows()
+            ]
+        sub["decision_reason"] = sub[reason_col].fillna("unknown").astype(str)
+        sub["model_correct"] = sub["model_pred_label"].astype(str).eq(sub["true_label"].astype(str))
+        sub["warning_flag"] = sub.get("warning_reasons", pd.Series("", index=sub.index)).fillna("").astype(str).str.strip().ne("")
+        group_cols = [
+            col for col in [
+                "task", "scenario", "strategy", *SCENARIO_METADATA_COLUMNS, "decision_reason",
+            ] if col in sub.columns
+        ]
+        grouped = sub.groupby(group_cols, dropna=False)
+        partial = grouped.agg(
+            n=("decision_reason", "size"),
+            accuracy=("correct", "mean"),
+            model_correct_rate=("model_correct", "mean"),
+            rule_coverage_rate=("baseline_covered", "mean"),
+            hybrid_rule_rate=("hybrid_used_rule", "mean"),
+            hybrid_model_rate=("hybrid_used_model", "mean"),
+            low_confidence_abstain_rate=("hybrid_low_confidence_abstain", "mean"),
+            warning_rate=("warning_flag", "mean"),
+            rule_model_conflict_rate=("rule_model_conflict", "mean"),
+            mean_rule_confidence=("rule_confidence", "mean"),
+            mean_rule_evidence_score=("rule_evidence_score", "mean"),
+            mean_model_confidence=("model_confidence", "mean"),
+        ).reset_index()
+        total_cols = [col for col in group_cols if col != "decision_reason"]
+        partial["reason_fraction"] = partial["n"] / partial.groupby(total_cols, dropna=False)["n"].transform("sum")
+        rows.append(partial)
+    if not rows:
+        return pd.DataFrame()
+    out = pd.concat(rows, ignore_index=True)
+    sort_cols = [col for col in ["task", "scenario", "strategy", "n"] if col in out.columns]
+    ascending = [True] * len(sort_cols)
+    if "n" in sort_cols:
+        ascending[sort_cols.index("n")] = False
+    return out.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
 def parse_checkpoint_identity(checkpoint_path: str) -> dict:
     path = Path(checkpoint_path)
     exp_seed = path.parent.name
@@ -493,7 +596,8 @@ def strategy_predictions(
     complete_for_rule = bool(rule_info.get("complete_for_rule", baseline_covered))
     forced = str(rule_info.get("forced_rule_label") or INSUFFICIENT_EVIDENCE_LABEL)
     abstain = str(rule_info.get("abstain_rule_label") or INSUFFICIENT_EVIDENCE_LABEL)
-    use_rule = complete_for_rule and baseline_covered and rule_confidence >= float(threshold)
+    rule_label_available = forced not in {"", "None", INSUFFICIENT_EVIDENCE_LABEL}
+    use_rule = rule_label_available and rule_confidence >= float(threshold)
     confidence_threshold = max(0.0, min(1.0, float(model_confidence_threshold or 0.0)))
     confidence_value = None if model_confidence is None else float(model_confidence)
     low_confidence = (
@@ -501,6 +605,18 @@ def strategy_predictions(
         and confidence_value is not None
         and confidence_value < confidence_threshold
     )
+    warning_text = str(rule_info.get("warning_reasons") or "").strip(";")
+    if use_rule:
+        reason = "rule_score_ge_threshold_with_warning" if warning_text else "rule_score_ge_threshold"
+    elif bool(rule_info.get("scenario_forced_model_fallback", False)):
+        reason = "model_fallback_scenario_forced_missingness"
+    elif not rule_label_available:
+        reason = "model_fallback_no_rule_prediction"
+    elif rule_confidence < float(threshold):
+        reason = "model_fallback_low_rule_score"
+    else:
+        reason = "model_fallback"
+    confidence_gate_reason = "abstain_low_model_confidence" if low_confidence else reason
     return {
         "model_only": str(model_pred),
         "rule_forced": forced,
@@ -512,6 +628,8 @@ def strategy_predictions(
         "hybrid_confidence_gate_used_rule": bool(use_rule),
         "hybrid_confidence_gate_used_model": (not bool(use_rule)) and (not bool(low_confidence)),
         "hybrid_low_confidence_abstain": bool(low_confidence),
+        "hybrid_decision_reason": reason,
+        "hybrid_confidence_gate_decision_reason": confidence_gate_reason,
     }
 
 
@@ -659,12 +777,16 @@ def run_experiment(args):
                             "compatible_labels": rule_info.get("compatible_labels"),
                             "rule_model_conflict": bool(rule_info.get("rule_model_conflict", False)),
                             "warning_reasons": rule_info.get("warning_reasons"),
+                            "rule_evidence_score": float(rule_info.get("rule_evidence_score", rule_info.get("rule_confidence", 0.0)) or 0.0),
+                            "score_deductions": rule_info.get("score_deductions"),
                             "scenario_forced_model_fallback": bool(rule_info.get("scenario_forced_model_fallback", False)),
                             "hybrid_used_rule": bool(preds["hybrid_used_rule"]),
                             "hybrid_used_model": bool(preds["hybrid_used_model"]),
                             "hybrid_confidence_gate_used_rule": bool(preds["hybrid_confidence_gate_used_rule"]),
                             "hybrid_confidence_gate_used_model": bool(preds["hybrid_confidence_gate_used_model"]),
                             "hybrid_low_confidence_abstain": bool(preds["hybrid_low_confidence_abstain"]),
+                            "hybrid_decision_reason": preds["hybrid_decision_reason"],
+                            "hybrid_confidence_gate_decision_reason": preds["hybrid_confidence_gate_decision_reason"],
                             "model_confidence_threshold": float(args.model_confidence_threshold),
                         })
 
@@ -694,11 +816,19 @@ def run_experiment(args):
     per_class = pd.DataFrame(per_class_rows)
     degradation = add_complete_baseline_deltas(summary)
     compensation = build_evidence_compensation_summary(degradation)
+    missingness_reason = build_missingness_hybrid_reason_summary(predictions)
     summary.to_csv(out_dir / "artificial_missingness_summary.csv", index=False, encoding="utf-8-sig")
     degradation.to_csv(out_dir / "artificial_missingness_degradation_summary.csv", index=False, encoding="utf-8-sig")
     per_class.to_csv(out_dir / "artificial_missingness_per_class.csv", index=False, encoding="utf-8-sig")
     compensation.to_csv(out_dir / "evidence_compensation_summary.csv", index=False, encoding="utf-8-sig")
+    missingness_reason.to_csv(out_dir / "missingness_hybrid_reason_summary.csv", index=False, encoding="utf-8-sig")
     predictions.to_csv(out_dir / "artificial_missingness_predictions.csv", index=False, encoding="utf-8-sig")
+    if getattr(args, "paper_tables_dir", ""):
+        paper_tables_dir = Path(args.paper_tables_dir)
+        paper_tables_dir.mkdir(parents=True, exist_ok=True)
+        degradation.to_csv(paper_tables_dir / "missingness_degradation_summary.csv", index=False, encoding="utf-8-sig")
+        compensation.to_csv(paper_tables_dir / "missingness_evidence_compensation_summary.csv", index=False, encoding="utf-8-sig")
+        missingness_reason.to_csv(paper_tables_dir / "missingness_hybrid_reason_summary.csv", index=False, encoding="utf-8-sig")
     manifest = {
         "checkpoints": checkpoints,
         "tasks": requested_tasks,
@@ -720,6 +850,7 @@ def run_experiment(args):
             "degradation_summary": str(out_dir / "artificial_missingness_degradation_summary.csv"),
             "per_class": str(out_dir / "artificial_missingness_per_class.csv"),
             "evidence_compensation": str(out_dir / "evidence_compensation_summary.csv"),
+            "hybrid_reason_summary": str(out_dir / "missingness_hybrid_reason_summary.csv"),
             "predictions": str(out_dir / "artificial_missingness_predictions.csv"),
         },
     }
@@ -731,12 +862,13 @@ def run_experiment(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate deployment no-support robustness under artificial missingness.")
+    parser = argparse.ArgumentParser(description="Evaluate support-free robustness under artificial missingness stress scenarios.")
     parser.add_argument("--data-dir", default=".")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--checkpoints", default=None, help="Comma-separated checkpoint paths.")
     parser.add_argument("--checkpoint-glob", default=None, help="Glob such as results_v74/five_runs/**/best_model.pth.")
     parser.add_argument("--output-dir", default="results_v74/artificial_missingness")
+    parser.add_argument("--paper-tables-dir", default="", help="Optional paper_v74/tables directory for paper-ready missingness summaries.")
     parser.add_argument("--tasks", default="Task1,Task2,Task3")
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--rule-confidence-threshold", type=float, default=0.8)

@@ -189,6 +189,8 @@ def load_rule_predictions(path: Path) -> pd.DataFrame:
         "complete_for_rule",
         "evidence_status",
         "rule_confidence",
+        "rule_evidence_score",
+        "score_deductions",
         "warning_reasons",
     ]
     for col in keep_cols:
@@ -214,6 +216,8 @@ def attach_rule_predictions(model_df: pd.DataFrame, rule_df: pd.DataFrame) -> pd
         "complete_for_rule",
         "evidence_status",
         "rule_confidence",
+        "rule_evidence_score",
+        "score_deductions",
         "warning_reasons",
     ]
     left = left.drop(columns=[col for col in rule_cols if col in left.columns], errors="ignore")
@@ -487,6 +491,8 @@ def build_rule_true_model_conflicts(df: pd.DataFrame) -> pd.DataFrame:
         "complete_for_rule",
         "evidence_status",
         "rule_confidence",
+        "rule_evidence_score",
+        "score_deductions",
         "warning_reasons",
         "confidence",
         "rule_true_model_conflict_type",
@@ -634,6 +640,64 @@ def build_decision_safety_summary(df: pd.DataFrame, low_confidence_threshold: fl
     return pd.DataFrame(rows)
 
 
+def build_clinical_error_taxonomy(df: pd.DataFrame) -> pd.DataFrame:
+    out = add_rule_true_model_columns(df)
+    if out.empty:
+        return pd.DataFrame()
+
+    model_confidence = pd.to_numeric(out.get("confidence", pd.Series(np.nan, index=out.index)), errors="coerce")
+    warning_source = out.get("warning_reasons", pd.Series("", index=out.index)).fillna("").astype(str)
+    incomplete_rule_data = ~out.get("complete_for_rule", pd.Series(True, index=out.index)).fillna(True).astype(bool)
+
+    conditions = [
+        out["rule_abstained"] & out["model_correct"],
+        out["rule_abstained"] & (~out["model_correct"]),
+        out["rule_correct"] & (~out["model_correct"]),
+        out["model_correct"] & (~out["rule_correct"]) & out["rule_available"],
+        out["rule_available"] & out["rule_model_agree"] & (~out["model_correct"]),
+        out["rule_available"] & out["rule_model_disagree"] & (~out["rule_correct"]) & (~out["model_correct"]),
+        out["rule_available"] & out["rule_correct"] & out["model_correct"],
+    ]
+    choices = [
+        "rule_abstained_model_correct",
+        "rule_abstained_model_wrong",
+        "rule_correct_model_wrong",
+        "model_correct_rule_wrong",
+        "rule_model_agree_both_wrong",
+        "rule_model_disagree_both_wrong",
+        "rule_and_model_correct",
+    ]
+    out["clinical_error_taxonomy"] = np.select(conditions, choices, default="unclassified")
+    out["low_model_confidence_flag"] = model_confidence.lt(0.6)
+    out["has_warning_flag"] = warning_source.str.strip().ne("")
+    out["incomplete_rule_data_flag"] = incomplete_rule_data
+
+    group_cols = [
+        col for col in [
+            "config_name", "exp_name", "seed", "prediction_file", "evaluation_mode",
+            "task", "label_col", "clinical_error_taxonomy"
+        ] if col in out.columns
+    ]
+    summary = (
+        out.groupby(group_cols, dropna=False)
+        .agg(
+            n=("clinical_error_taxonomy", "size"),
+            model_correct_rate=("model_correct", "mean"),
+            rule_correct_rate=("rule_correct", "mean"),
+            rule_available_rate=("rule_available", "mean"),
+            rule_model_disagree_rate=("rule_model_disagree", "mean"),
+            low_model_confidence_rate=("low_model_confidence_flag", "mean"),
+            warning_rate=("has_warning_flag", "mean"),
+            incomplete_rule_data_rate=("incomplete_rule_data_flag", "mean"),
+        )
+        .reset_index()
+    )
+    total_cols = [col for col in group_cols if col != "clinical_error_taxonomy"]
+    totals = summary.groupby(total_cols, dropna=False)["n"].transform("sum") if total_cols else summary["n"].sum()
+    summary["taxonomy_fraction"] = summary["n"] / totals
+    return summary.sort_values(total_cols + ["n"], ascending=[True] * len(total_cols) + [False]).reset_index(drop=True)
+
+
 def build_task2_confusion_focus(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "task" not in df.columns:
         return pd.DataFrame()
@@ -689,6 +753,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
         "task2_clinical_subgroups": output_dir / "task2_clinical_subgroups.csv",
         "task2_confusion_focus": output_dir / "task2_confusion_focus.csv",
         "decision_safety_summary": output_dir / "decision_safety_summary.csv",
+        "clinical_error_taxonomy_summary": output_dir / "clinical_error_taxonomy_summary.csv",
         "manifest": output_dir / "error_analysis_manifest.json",
     }
 
@@ -713,6 +778,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
     task2_clinical_df = build_task2_clinical_subgroups(df)
     task2_confusion_df = build_task2_confusion_focus(df)
     decision_safety_df = build_decision_safety_summary(df)
+    clinical_error_taxonomy_df = build_clinical_error_taxonomy(df)
     error_df = df.loc[~df["correct"]].copy()
     error_df = error_df.sort_values(["task", "label_col", "confidence"], ascending=[True, True, False])
 
@@ -728,6 +794,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
     task2_clinical_df.to_csv(files["task2_clinical_subgroups"], index=False, encoding="utf-8-sig")
     task2_confusion_df.to_csv(files["task2_confusion_focus"], index=False, encoding="utf-8-sig")
     decision_safety_df.to_csv(files["decision_safety_summary"], index=False, encoding="utf-8-sig")
+    clinical_error_taxonomy_df.to_csv(files["clinical_error_taxonomy_summary"], index=False, encoding="utf-8-sig")
 
     manifest = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -743,6 +810,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
         "n_task2_clinical_subgroup_rows": int(len(task2_clinical_df)),
         "n_task2_confusion_focus_rows": int(len(task2_confusion_df)),
         "n_decision_safety_summary_rows": int(len(decision_safety_df)),
+        "n_clinical_error_taxonomy_summary_rows": int(len(clinical_error_taxonomy_df)),
         "files": {key: str(path) for key, path in files.items()},
     }
     files["manifest"].write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")

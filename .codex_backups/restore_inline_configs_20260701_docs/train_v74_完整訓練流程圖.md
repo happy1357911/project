@@ -1,17 +1,3 @@
-<!-- 2026-07-01-inline-run-configs -->
-
-## 2026-07-01 目前參數設定狀態
-
-本專案已取消外部參數檔。正式訓練參數集中在 `train_v74.py` 內維護：
-
-- `MODEL_SIZE_CONFIGS`：base / small / tiny 的模型大小設定。
-- `MISSING_AUG_PROFILES`：Task1、Task2、Task3 的缺失資料 augmentation 權重。
-- `RUN_CONFIGS`：15 組正式訓練參數。
-- `ABLATION_RUN_CONFIGS`：5 組 ablation 參數。
-
-`train_v74.py` 仍使用 `--config_preset recommended|ablation|all` 選擇要跑正式組、ablation 組或全部 20 組。`run_all_v74.py` 與 `run_locked_test_v74.py` 不再接受外部參數檔路徑。若要改參數或分電腦跑，請直接在同一套程式的 `train_v74.py` 內調整參數組合或自行改要執行的 config，不再使用外部分工檔。同步程式也不再同步舊 config 目錄，正式封包中的舊 config 目錄已清除。
-
-<!-- /2026-07-01-inline-run-configs -->
 # train_v74.py 完整訓練流程圖
 
 <!-- 2026-06-27-narrative-alignment -->
@@ -44,15 +30,17 @@ for ear-level hearing classification under incomplete audiological evidence.
 
 ## 2026-06-26 目前完整流程與分散式訓練說明
 
+本段依目前 `run_all_v74.py`、`train_v74.py`、`sync_all_outputs_v74.py` 與 `configs/*.json` 核對後更新。
 目前程式碼對齊重點：
 - Task1 資料來源：`task1_all_three_common14_v1.csv`。
 - Task2/Task3 資料來源：`task2_3_pure_data(6_24).xlsx`。
 - 目前特徵數：Task1 = 5、Task2 = 36、Task3 = 16、三任務 union = 53。
 - Task2 模型輸入包含 AC 500/1000/2000/4000/6000/8000 Hz、六頻 AC NR 標記、BC 500/1000/2000/4000 Hz、BC NR/缺失標記、ABG 500/1000/2000/4000 Hz 的數值/缺失/截尾標記。
-- Task2 規則使用 AC 500/1000/2000/4000 Hz，加上 6000/8000 Hz 至少一個高頻存在作為完整性條件；ABG 以 `abs(AC-BC)>=10 dB` 判定 clear ABG，`8<=ABG<10 dB` 作邊界警示。
+- Task2 規則使用 AC 500/1000/2000/4000 Hz，加上 6000/8000 Hz 至少一個高頻存在作為完整性條件；ABG 以 `abs(AC-BC)>10 dB` 判定，8-10 dB 只作邊界警示。
 - Task3 規則：`peak_daPa <= -300` 判 B，`-300 < peak_daPa <= -150` 判 C 且信心度較低，`peak_daPa > -150` 判 A；NP peak 加 NP compliance 判 B。
-- 混合式決策的規則優先策略改以 `rule_confidence` / `rule_evidence_score` 門檻決定是否採用規則；分數達門檻時採用 rule，分數不足時交由模型，若模型信心度低於門檻則可暫不判讀。
-- `train_v74.py 內建 RUN_CONFIGS/ABLATION_RUN_CONFIGS` 為完整 20 組設定：15 組 `run_configs` 加 5 組 `ablation_run_configs`。
+- 混合式決策的規則優先策略只有在 `complete_for_rule=True`、`baseline_covered=True` 且 `rule_confidence` 達門檻時採用規則；否則使用模型，若模型信心度低於門檻則可暫不判讀。
+- `configs/run_configs_v74.json` 為完整 20 組設定：15 組 `run_configs` 加 5 組 `ablation_run_configs`。
+- `configs/splits/run_configs_v74_part_A.json` 與 `configs/splits/run_configs_v74_part_B.json` 各選 10 組，供兩台電腦分工訓練；沒有 A/B 自動回退。
 - `all/` 預設是給 GPT/教授分析的 `analysis_only` 封包；可用 `--include-raw-data` 納入目前使用的原始資料，但未包含 checkpoint 與大型逐列預測時，仍不是完整可重跑封包。
 - 本輪邊緣端/model profile 仍可用 `--skip-model-profile` 延後，不作為目前主流程必跑項。
 
@@ -62,7 +50,7 @@ for ear-level hearing classification under incomplete audiological evidence.
 |---|---|---|---|
 | 0 | `python -m py_compile` | 檢查 root Python 語法 | 無錯誤即可 |
 | 1 | `split_protocol_v74.py` | 建立 grouped locked-test split | `results_v74/split_protocol/split_manifest.csv`, `split_summary.csv` |
-| 2 | `train_v74.py` | 依內建 config 訓練 full/no_meta/no_irl/single_task，並帶入 locked split manifest | `results_v74/five_runs/**/best_model.pth`, 逐筆預測列, no-support 與 locked-test no-support 指標 |
+| 2 | `train_v74.py` | 依 JSON config 訓練 full/no_meta/no_irl/single_task，並帶入 locked split manifest | `results_v74/five_runs/**/best_model.pth`, 逐筆預測列, no-support 與 locked-test no-support 指標 |
 | 3 | `baseline_rules_v74.py` | 缺值感知臨床規則基準 | `results_v74/rule_baselines_phase3/` |
 | 4 | `ml_baselines_v74.py` | 傳統機器學習基準 | `results_v74/ml_baselines/` |
 | 5 | `error_analysis_v74.py --mode all` | configured/no-support/locked-test 三方衝突與 safety 分析 | `paper_v74/error_analysis/` |
@@ -78,6 +66,7 @@ for ear-level hearing classification under incomplete audiological evidence.
 | 13 | `sync_all_outputs_v74.py` | 同步 `all/` 封包 | `all/sync_manifest_v74.json` |
 | 14 | internal verify | 檢查主要輸出是否存在 | 無缺失輸出 error |
 
+兩台電腦分工訓練不是直接各跑完整 `run_all_v74.py`；建議各自跑 `train_v74.py` 的 A/B split，完成後合併 `results_v74_part_A/five_runs/*` 與 `results_v74_part_B/five_runs/*` 到主電腦 `results_v74/five_runs/`，再由主電腦跑後處理。
 
 <!-- /2026-06-26-current-flow-alignment -->
 
@@ -445,8 +434,9 @@ python run_all_v74.py --skip-model-profile
 
 ## 2026-06-21 參數組合 15 組 recommended + 5 組 ablation
 
-此歷史段落已整理為可讀摘要：當時將訓練組合整理為 15 組 `RUN_CONFIGS` 與 5 組 `ABLATION_RUN_CONFIGS`，涵蓋 base/small/tiny 三種模型大小與多種 masking profile。後續已進一步集中在 `train_v74.py 內建 RUN_CONFIGS/ABLATION_RUN_CONFIGS`，；舊外部分工檔已移除，若要分工請直接調整 `train_v74.py` 內的參數組合。
+此歷史段落已整理為可讀摘要：當時將訓練組合整理為 15 組 `RUN_CONFIGS` 與 5 組 `ABLATION_RUN_CONFIGS`，涵蓋 base/small/tiny 三種模型大小與多種 masking profile。後續已進一步外部化為 `configs/run_configs_v74.json`，並新增 `configs/splits/run_configs_v74_part_A.json` / `part_B.json` 供兩台電腦分工訓練。
 
+目前最新 config 狀態：完整 JSON 為 15 + 5 = 20 組；A/B split 各 10 組；預設 checkpoint resolver 仍以 `run_02_base_m10_balanced_r015/full_seed_0/best_model.pth` 作為偏好 checkpoint。
 
 <!-- 2026-06-27-p0-p4-final-alignment -->
 
@@ -494,23 +484,3 @@ python run_all_v74.py --skip-model-profile
 
 後處理流程不需額外修改 `run_all_v74.py`，因為 Step 9 已使用 `--tasks Task1,Task2,Task3`；新增 Task1 scenarios 後會自然進入人工缺失輸出。
 <!-- /2026-07-01-task1-missingness-alignment -->
-## 2026-07-02 最新規則更新：Rule Evidence Score 與 Hybrid Gating
-
-- Task2 clear ABG 現在定義為 `abs(AC-BC) >= 10 dB`。
-- Task2 borderline ABG 現在定義為 `8 <= abs(AC-BC) < 10 dB`；borderline 不直接觸發 CHL/MHL，只扣 rule evidence score 0.1 並加上 `abg_borderline` warning。
-- Task2 的 `rule_forced` 仍保留硬判 label；但正式 rule-first / hybrid 是否採用 rule，改由 `rule_confidence` / `rule_evidence_score` 門檻控制。
-- Task2 score 起始為 1.0：缺 core AC 扣 0.15；6000/8000 兩者都缺扣 0.05；BC 部分缺失整組扣 0.3；no BC data 直接壓到 0.5；NR/censored 只加 warning，不當 missing。
-- Task3 evidence score 納入 `tymp_Vea` 缺失檢查；Vea 缺失只扣 0.05 並加 warning，不直接改 A/B/C label。
-- Task3 `peak_daPa` 缺失時 score 最高 0.5；`peak NP + compliance NP` 視為有效 B 型證據；`-300 < peak_daPa <= -150` 為 C 區間但扣 0.2，並保留 C/B compatible label。
-- Hybrid rule-first 現在使用 score gating：`rule_confidence >= 0.8` 且 rule label 存在時採用 rule；score 不足時 fallback model；model confidence 低於門檻時可輸出 `INSUFFICIENT_EVIDENCE`。
-- 新增或保留的輸出欄位包含 `rule_evidence_score`、`score_deductions`、`rule_confidence`、`warning_reasons`、`hybrid_decision_reason`。
-- 注意：依目前資料暫存檢查，`ABG>=10` 搭配「任一頻率有 clear ABG 即判 CHL/MHL」會明顯拉低 Task2 rule-forced 表現；這是規則定義的結果，不是流程錯誤，後續若要改善需再討論是否加入「至少兩個非 censored ABG 頻率」等條件。
-## 2026-07-02 run_all_v74.py 最新流程補充
-
-完整流程現在在 hybrid、missingness、feature importance、calibration 階段額外產生 paper-ready tables：
-- Step 7a/7b hybrid_evaluation_v74.py：輸出 main_hybrid_summary、rule_contribution_summary、hybrid_explainability_summary、main_method_comparison。
-- Step 8a/8b calibration_analysis_v74.py：輸出 calibration_summary_paper 與 calibration_summary_paper_locked_test。
-- Step 9 artificial_missingness_v74.py：輸出 missingness_degradation_summary、missingness_evidence_compensation_summary、missingness_hybrid_reason_summary。
-- Step 10 feature_importance_v74.py：輸出 feature_importance_summary、feature_group_importance_summary、feature_missingness_link_summary。
-
-verify_key_outputs() 已加入上述輸出檢查；若完整流程缺少任何正式表格，run_all 會在最後驗證階段報錯。
