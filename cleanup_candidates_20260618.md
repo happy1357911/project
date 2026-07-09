@@ -1,3 +1,38 @@
+<!-- 2026-07-08-directional-abg-rule-gate -->
+
+## 2026-07-08 Current Rule and Hybrid Gate
+
+This block records the current code behavior. If older historical sections mention the old absolute-gap formula, the old 10 dB ABG rule, or direct Task3 B/C hard labels, this block is authoritative.
+
+### Task2 directional ABG
+
+- Task2 rule no longer uses the old absolute-gap formula.
+- Meaningful ABG is directional: `AC - BC >= 15 dB`.
+- `BC - AC >= 15 dB` is not ABG. It is flagged as `negative_abg_or_measurement_inconsistency` and falls back to the model.
+- `10 <= AC - BC < 15 dB` is `abg_borderline`; it does not trigger CHL/MHL and falls back to the model.
+- AC 6000/8000 Hz is model input and supplemental warning evidence only. It does not independently decide SNHL in the rule path.
+
+### Task2 rule-first gate
+
+- Forced rule labels may still output WNL/SNHL/CHL/MHL for baseline analysis.
+- Official rule-first currently allows only covered `SNHL` and `WNL` cases.
+- `MHL` and `CHL` are kept for forced-rule analysis but are blocked from official hybrid rule-first because the current labels and simplified numeric rules still conflict for those classes.
+- Missing data, borderline ABG, negative ABG, high-frequency-only abnormality, and unclear rule combinations all set `baseline_covered=False` and fall back to the model.
+
+### Task3 rule-first gate
+
+- `peak NP + compliance NP` remains valid Type B evidence.
+- `peak_daPa <= -300` and `-300 < peak_daPa <= -150` are B/C-uncertain and fall back to the model.
+- `peak_daPa > -150` can be rule-first Type A only when there is no low-compliance or wide-width warning.
+- `compliance < 0.20` or `width >= 200` is A/B-uncertain and falls back to the model.
+- Vea missing is an evidence warning only; it does not decide A/B/C by itself.
+
+### Hybrid gate
+
+Official hybrid uses rule only when all conditions hold: valid `rule_decision_label`, `baseline_covered=True`, `complete_for_rule=True`, `rule_confidence >= 0.8`, and no hard warning in `warning_reasons`. Otherwise it uses the model prediction, with low-confidence abstain only when model confidence is below threshold. `rule_forced` is analysis-only and is not the deployed decision policy.
+
+<!-- /2026-07-08-directional-abg-rule-gate -->
+
 <!-- 2026-07-01-inline-run-configs -->
 
 ## 2026-07-01 目前參數設定狀態
@@ -22,8 +57,8 @@
 - Task2/Task3 資料來源：`task2_3_pure_data(6_24).xlsx`。
 - 目前 feature 數：Task1 = 5、Task2 = 36、Task3 = 16、三任務 union = 53。
 - Task2 model 輸入包含 AC 500/1000/2000/4000/6000/8000 Hz、六頻 AC NR flags、BC 500/1000/2000/4000 Hz、BC NR/missing flags、ABG 500/1000/2000/4000 Hz 的 value/missing/censored flags。
-- Task2 rule 使用 AC 500/1000/2000/4000 Hz 加上 6000/8000 Hz 至少一個高頻存在作為完整性條件；ABG 以 `abs(AC-BC)>=10 dB` 判定 clear ABG，`8<=ABG<10 dB` 只作 borderline warning。
-- Task3 rule：`peak_daPa <= -300` 判 B，`-300 < peak_daPa <= -150` 判 C 且 confidence 較低，`peak_daPa > -150` 判 A；NP peak 加 NP compliance 判 B。
+- Task2 rule 使用 AC 500/1000/2000/4000 Hz 加上 6000/8000 Hz 至少一個高頻存在作為完整性條件；ABG 以 `AC-BC>=15 dB` 判定 clear ABG，`10<=AC-BC<15 dB` 只作 borderline warning。
+- Task3 current rule: peak <= -150 is B/C-uncertain and falls back to model; clear A requires peak > -150 without low-compliance or wide-width warning.
 - Hybrid rule-first 改以 `rule_confidence` / `rule_evidence_score` 門檻決定是否採用 rule；score 達門檻時採用 rule，score 不足時 fallback model，若 model confidence 低於門檻則可 abstain。
 - `train_v74.py 內建 RUN_CONFIGS/ABLATION_RUN_CONFIGS` 為完整 20 組設定：15 組 `run_configs` 加 5 組 `ablation_run_configs`。
 - `all/` 預設是 `analysis_only` package，不含 raw data、checkpoint、large row-level prediction；需要可重跑包才使用 `--package-type execution_ready`。

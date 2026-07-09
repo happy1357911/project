@@ -58,6 +58,25 @@ def safe_pick_device():
     return torch.device("cpu")
 
 
+
+def resolve_requested_device(device_choice: str = "auto") -> torch.device:
+    choice = str(device_choice or "auto").strip().lower()
+    if choice in {"", "auto"}:
+        return safe_pick_device()
+    if choice == "cpu":
+        return torch.device("cpu")
+    if choice.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError("--device cuda was requested, but CUDA is not available.")
+        device = torch.device(choice)
+        major, minor = torch.cuda.get_device_capability(device)
+        if (major, minor) not in SUPPORTED_CC:
+            raise RuntimeError(
+                f"--device {choice} was requested, but CUDA sm_{major}{minor} is not in SUPPORTED_CC."
+            )
+        return device
+    raise ValueError(f"Unsupported --device value: {device_choice}. Use auto, cpu, cuda, or cuda:<index>.")
+
 # 全域裝置
 DEVICE = safe_pick_device()
 
@@ -240,14 +259,6 @@ RUN_CONFIGS = [
     make_run_config("run_05_base_m20_heavy_balanced_r010", "base", "m20_heavy_balanced", 0.10),
     make_run_config("run_06_small_m05_balanced_r015", "small", "m05_balanced", 0.15),
     make_run_config("run_07_small_m10_balanced_r015", "small", "m10_balanced", 0.15),
-    make_run_config("run_08_small_m15_bc_dominant_r015", "small", "m15_bc_dominant", 0.15),
-    make_run_config("run_09_small_m15_tymp_dominant_r015", "small", "m15_tymp_dominant", 0.15),
-    make_run_config("run_10_small_m20_heavy_balanced_r010", "small", "m20_heavy_balanced", 0.10),
-    make_run_config("run_11_tiny_m05_balanced_r010", "tiny", "m05_balanced", 0.10),
-    make_run_config("run_12_tiny_m10_balanced_r010", "tiny", "m10_balanced", 0.10),
-    make_run_config("run_13_tiny_m15_bc_dominant_r010", "tiny", "m15_bc_dominant", 0.10),
-    make_run_config("run_14_tiny_m15_tymp_dominant_r010", "tiny", "m15_tymp_dominant", 0.10),
-    make_run_config("run_15_tiny_m20_heavy_balanced_r005", "tiny", "m20_heavy_balanced", 0.05),
 ]
 
 ABLATION_RUN_CONFIGS = [
@@ -271,18 +282,6 @@ ABLATION_RUN_CONFIGS = [
         "m10_balanced",
         0.15,
         support_per_class=2,
-    ),
-    make_run_config(
-        "ablation_base_m20_high_reward_r020",
-        "base",
-        "m20_heavy_balanced",
-        0.20,
-    ),
-    make_run_config(
-        "ablation_base_m30_stress_r010",
-        "base",
-        "m30_stress",
-        0.10,
     ),
 ]
 
@@ -2579,11 +2578,20 @@ def parse_args():
         choices=["full_loader", "equal_steps", "round_robin_k1", "round_robin_k2", "round_robin_k4", "round_robin_k16"],
         help="Override task_sampling_mode for all RUN_CONFIGS without changing hyperparameter sets.",
     )
+    p.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Training device: auto, cpu, cuda, or cuda:<index>. Forced cuda fails if CUDA is unavailable.",
+    )
     return p.parse_args()
 
 
 def main():
+    global DEVICE
     args = parse_args()
+    DEVICE = resolve_requested_device(args.device)
+    print(f"[MetaIRL v7.4] Requested device={args.device}; resolved device={DEVICE}")
 
     # 單一 seed 與多 seed 兩種模式
     if args.seed is not None:

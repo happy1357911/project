@@ -1,3 +1,88 @@
+<!-- 2026-07-08-hard-warning-taxonomy-update -->
+## 2026-07-08 Full-flow output update
+
+The full pipeline now treats the following files as required analysis outputs:
+
+- Step 5 / `error_analysis_v74.py`: `paper_v74/error_analysis/task2_rule_label_conflict_audit.csv`.
+- Step 9 / `artificial_missingness_v74.py`: `results_v74/artificial_missingness/clinical_missingness_taxonomy.csv`.
+- Step 9 / paper tables: `paper_v74/tables/clinical_missingness_taxonomy.csv`.
+
+The official hybrid gate is now shared across batch evaluation, missingness stress tests, model profiling, and the dashboard through `clinical_rules_v74.has_hard_rule_warning()`.
+
+<!-- /2026-07-08-hard-warning-taxonomy-update -->
+
+<!-- 2026-07-08-directional-abg-rule-gate -->
+
+## 2026-07-08 Current Rule and Hybrid Gate
+
+This block records the current code behavior. If older historical sections mention the old absolute-gap formula, the old 10 dB ABG rule, or direct Task3 B/C hard labels, this block is authoritative.
+
+### Task2 directional ABG
+
+- Task2 rule no longer uses the old absolute-gap formula.
+- Meaningful ABG is directional: `AC - BC >= 15 dB`.
+- `BC - AC >= 15 dB` is not ABG. It is flagged as `negative_abg_or_measurement_inconsistency` and falls back to the model.
+- `10 <= AC - BC < 15 dB` is `abg_borderline`; it does not trigger CHL/MHL and falls back to the model.
+- AC 6000/8000 Hz is model input and supplemental warning evidence only. It does not independently decide SNHL in the rule path.
+
+### Task2 rule-first gate
+
+- Forced rule labels may still output WNL/SNHL/CHL/MHL for baseline analysis.
+- Official rule-first currently allows only covered `SNHL` and `WNL` cases.
+- `MHL` and `CHL` are kept for forced-rule analysis but are blocked from official hybrid rule-first because the current labels and simplified numeric rules still conflict for those classes.
+- Missing data, borderline ABG, negative ABG, high-frequency-only abnormality, and unclear rule combinations all set `baseline_covered=False` and fall back to the model.
+
+### Task3 rule-first gate
+
+- `peak NP + compliance NP` remains valid Type B evidence.
+- `peak_daPa <= -300` and `-300 < peak_daPa <= -150` are B/C-uncertain and fall back to the model.
+- `peak_daPa > -150` can be rule-first Type A only when there is no low-compliance or wide-width warning.
+- `compliance < 0.20` or `width >= 200` is A/B-uncertain and falls back to the model.
+- Vea missing is an evidence warning only; it does not decide A/B/C by itself.
+
+### Hybrid gate
+
+Official hybrid uses rule only when all conditions hold: valid `rule_decision_label`, `baseline_covered=True`, `complete_for_rule=True`, `rule_confidence >= 0.8`, and no hard warning in `warning_reasons`. Otherwise it uses the model prediction, with low-confidence abstain only when model confidence is below threshold. `rule_forced` is analysis-only and is not the deployed decision policy.
+
+<!-- /2026-07-08-directional-abg-rule-gate -->
+
+<!-- 2026-07-05-device-routing-update -->
+
+## 2026-07-05 GPU/CPU 流程分工
+
+目前完整流程仍以 `run_all_v74.py` 統一調度，但 device 不再寫死 CPU：
+
+| Step | 腳本 | 裝置控制 | 說明 |
+|---|---|---|---|
+| 0 | `python -m py_compile` | CPU | 語法檢查。 |
+| 1 | `split_protocol_v74.py` | CPU | 建立 grouped locked-test split。 |
+| 2 | `train_v74.py` | `--device` | 預設 `auto`，正式長跑建議 `--device cuda`。 |
+| 3 | `baseline_rules_v74.py` | CPU | clinical rule baseline，無神經網路推論。 |
+| 4 | `ml_baselines_v74.py` | CPU | sklearn / classical ML baseline。 |
+| 5 | `error_analysis_v74.py` | CPU | 合併 prediction rows 與 rule/model/true label conflict。 |
+| 6 | `evaluate_v74.py` | CPU | 輸出 paper tables / figures。 |
+| 7a/7b | `hybrid_evaluation_v74.py` | CPU | 合併 rule/model prediction，計算 hybrid summary。 |
+| 8a/8b | `calibration_analysis_v74.py` | CPU | ECE、Brier、confidence threshold 統計。 |
+| 9 | `artificial_missingness_v74.py` | `--device` | 大量 checkpoint forward inference，正式建議 GPU。 |
+| 10 | `feature_importance_v74.py` | `--device` | 大量 ablation / permutation forward inference，正式建議 GPU。 |
+| 11 | `model_profile_v74.py` | `--profile-device` | optional；預設 CPU，保留 edge/profile latency 意義。 |
+| 12 | `run_locked_test_v74.py` | `--device` 傳給內部 training | optional formal locked-test pipeline。 |
+| 13 | `sync_all_outputs_v74.py` | CPU | 同步正式輸出到 `all/`。 |
+| 14 | internal verify | CPU | 檢查必要輸出檔是否存在。 |
+
+建議正式執行：
+
+```powershell
+python run_all_v74.py --skip-model-profile --device cuda
+```
+
+若要包含 optional locked-test runner：
+
+```powershell
+python run_all_v74.py --skip-model-profile --run-locked-test --locked-allow-overwrite --device cuda
+```
+
+<!-- /2026-07-05-device-routing-update -->
 <!-- 2026-07-01-inline-run-configs -->
 
 ## 2026-07-01 目前參數設定狀態
@@ -49,8 +134,8 @@ for ear-level hearing classification under incomplete audiological evidence.
 - Task2/Task3 資料來源：`task2_3_pure_data(6_24).xlsx`。
 - 目前特徵數：Task1 = 5、Task2 = 36、Task3 = 16、三任務 union = 53。
 - Task2 模型輸入包含 AC 500/1000/2000/4000/6000/8000 Hz、六頻 AC NR 標記、BC 500/1000/2000/4000 Hz、BC NR/缺失標記、ABG 500/1000/2000/4000 Hz 的數值/缺失/截尾標記。
-- Task2 規則使用 AC 500/1000/2000/4000 Hz，加上 6000/8000 Hz 至少一個高頻存在作為完整性條件；ABG 以 `abs(AC-BC)>=10 dB` 判定 clear ABG，`8<=ABG<10 dB` 作邊界警示。
-- Task3 規則：`peak_daPa <= -300` 判 B，`-300 < peak_daPa <= -150` 判 C 且信心度較低，`peak_daPa > -150` 判 A；NP peak 加 NP compliance 判 B。
+- Task2 規則使用 AC 500/1000/2000/4000 Hz，加上 6000/8000 Hz 至少一個高頻存在作為完整性條件；ABG 以 `AC-BC>=15 dB` 判定 clear ABG，`10<=AC-BC<15 dB` 作邊界警示。
+- Task3 current rule: peak <= -150 is B/C-uncertain and falls back to model; clear A requires peak > -150 without low-compliance or wide-width warning.
 - 混合式決策的規則優先策略改以 `rule_confidence` / `rule_evidence_score` 門檻決定是否採用規則；分數達門檻時採用 rule，分數不足時交由模型，若模型信心度低於門檻則可暫不判讀。
 - `train_v74.py 內建 RUN_CONFIGS/ABLATION_RUN_CONFIGS` 為完整 20 組設定：15 組 `run_configs` 加 5 組 `ablation_run_configs`。
 - `all/` 預設是給 GPT/教授分析的 `analysis_only` 封包；可用 `--include-raw-data` 納入目前使用的原始資料，但未包含 checkpoint 與大型逐列預測時，仍不是完整可重跑封包。
@@ -496,15 +581,15 @@ python run_all_v74.py --skip-model-profile
 <!-- /2026-07-01-task1-missingness-alignment -->
 ## 2026-07-02 最新規則更新：Rule Evidence Score 與 Hybrid Gating
 
-- Task2 clear ABG 現在定義為 `abs(AC-BC) >= 10 dB`。
-- Task2 borderline ABG 現在定義為 `8 <= abs(AC-BC) < 10 dB`；borderline 不直接觸發 CHL/MHL，只扣 rule evidence score 0.1 並加上 `abg_borderline` warning。
+- Task2 clear ABG 現在定義為 `AC-BC >= 15 dB`。
+- Task2 borderline ABG 現在定義為 `10 <= AC-BC < 15 dB`；borderline 不直接觸發 CHL/MHL，只扣 rule evidence score 0.1 並加上 `abg_borderline` warning。
 - Task2 的 `rule_forced` 仍保留硬判 label；但正式 rule-first / hybrid 是否採用 rule，改由 `rule_confidence` / `rule_evidence_score` 門檻控制。
 - Task2 score 起始為 1.0：缺 core AC 扣 0.15；6000/8000 兩者都缺扣 0.05；BC 部分缺失整組扣 0.3；no BC data 直接壓到 0.5；NR/censored 只加 warning，不當 missing。
 - Task3 evidence score 納入 `tymp_Vea` 缺失檢查；Vea 缺失只扣 0.05 並加 warning，不直接改 A/B/C label。
 - Task3 `peak_daPa` 缺失時 score 最高 0.5；`peak NP + compliance NP` 視為有效 B 型證據；`-300 < peak_daPa <= -150` 為 C 區間但扣 0.2，並保留 C/B compatible label。
 - Hybrid rule-first 現在使用 score gating：`rule_confidence >= 0.8` 且 rule label 存在時採用 rule；score 不足時 fallback model；model confidence 低於門檻時可輸出 `INSUFFICIENT_EVIDENCE`。
 - 新增或保留的輸出欄位包含 `rule_evidence_score`、`score_deductions`、`rule_confidence`、`warning_reasons`、`hybrid_decision_reason`。
-- 注意：依目前資料暫存檢查，`ABG>=10` 搭配「任一頻率有 clear ABG 即判 CHL/MHL」會明顯拉低 Task2 rule-forced 表現；這是規則定義的結果，不是流程錯誤，後續若要改善需再討論是否加入「至少兩個非 censored ABG 頻率」等條件。
+- 注意：依目前資料暫存檢查，`AC-BC>=15` 搭配「任一頻率有 clear ABG 即判 CHL/MHL」會明顯拉低 Task2 rule-forced 表現；這是規則定義的結果，不是流程錯誤，後續若要改善需再討論是否加入「至少兩個非 censored ABG 頻率」等條件。
 ## 2026-07-02 run_all_v74.py 最新流程補充
 
 完整流程現在在 hybrid、missingness、feature importance、calibration 階段額外產生 paper-ready tables：

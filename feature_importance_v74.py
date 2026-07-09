@@ -17,6 +17,22 @@ from artificial_missingness_v74 import (
 )
 from preprocessing_v74 import TASK_INFO
 
+def resolve_torch_device(device_choice: str = "auto") -> torch.device:
+    choice = str(device_choice or "auto").strip().lower()
+    if choice in {"", "auto"}:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        print("[feature_importance_v74] CUDA is unavailable; using CPU.")
+        return torch.device("cpu")
+    if choice == "cpu":
+        return torch.device("cpu")
+    if choice.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"--device {device_choice} was requested, but CUDA is not available.")
+        return torch.device(choice)
+    raise ValueError(f"Unsupported --device value: {device_choice}. Use auto, cpu, cuda, or cuda:<index>.")
+
+
 
 FEATURE_GROUPS = {
     "Task1": {
@@ -347,7 +363,8 @@ def build_feature_missingness_link_summary(feature_summary: pd.DataFrame, missin
         ascending[sort_cols.index("feature_macro_f1_drop_from_base_mean")] = False
     return out.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
 def run_feature_importance(args):
-    device = torch.device(args.device)
+    device = resolve_torch_device(args.device)
+    print(f"[feature_importance_v74] Requested device={args.device}; resolved device={device}")
     rng = np.random.default_rng(args.random_state)
     checkpoints = resolve_checkpoints(args)
     requested_tasks = [task.strip() for task in args.tasks.split(",") if task.strip()]
@@ -432,6 +449,8 @@ def run_feature_importance(args):
         "checkpoints": checkpoints,
         "tasks": requested_tasks,
         "batch_size": args.batch_size,
+        "requested_device": args.device,
+        "resolved_device": str(device),
         "permutation_repeats": args.permutation_repeats,
         "random_state": args.random_state,
         "missingness_degradation": args.missingness_degradation,
@@ -469,7 +488,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--permutation-repeats", type=int, default=5)
     parser.add_argument("--random-state", type=int, default=0)
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="auto", help="Device for neural inference: auto, cpu, cuda, or cuda:<index>.")
     args = parser.parse_args()
     baseline, ablation, permutation = run_feature_importance(args)
     print("baseline_rows=", len(baseline))

@@ -185,6 +185,7 @@ def verify_key_outputs(args: argparse.Namespace) -> None:
     assert_file_exists(paper_dir / "error_analysis" / "rule_true_model_conflicts.csv")
     assert_file_exists(paper_dir / "error_analysis" / "three_way_conflict_summary.csv")
     assert_file_exists(paper_dir / "error_analysis" / "clinical_error_taxonomy_summary.csv")
+    assert_file_exists(paper_dir / "error_analysis" / "task2_rule_label_conflict_audit.csv")
     assert_file_exists(results_dir / "split_protocol" / "split_manifest.csv")
     assert_file_exists(results_dir / "split_protocol" / "split_summary.csv")
     if args.skip_calibration:
@@ -209,9 +210,11 @@ def verify_key_outputs(args: argparse.Namespace) -> None:
         assert_file_exists(results_dir / "artificial_missingness" / "artificial_missingness_degradation_summary.csv")
         assert_file_exists(results_dir / "artificial_missingness" / "evidence_compensation_summary.csv")
         assert_file_exists(results_dir / "artificial_missingness" / "missingness_hybrid_reason_summary.csv")
+        assert_file_exists(results_dir / "artificial_missingness" / "clinical_missingness_taxonomy.csv")
         assert_file_exists(paper_dir / "tables" / "missingness_degradation_summary.csv")
         assert_file_exists(paper_dir / "tables" / "missingness_evidence_compensation_summary.csv")
         assert_file_exists(paper_dir / "tables" / "missingness_hybrid_reason_summary.csv")
+        assert_file_exists(paper_dir / "tables" / "clinical_missingness_taxonomy.csv")
     if args.skip_feature_importance:
         print("[INFO] Feature-importance checks skipped because --skip-feature-importance is set.")
     else:
@@ -313,6 +316,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the v7.4 missing-aware clinical-rule-guided hearing decision-support pipeline.")
     parser.add_argument("--python", default="python", help="Python executable used when --conda-env is empty.")
     parser.add_argument("--conda-env", default="", help="Optional conda environment name.")
+    parser.add_argument("--device", default="auto", help="Device for training and heavy neural inference: auto, cpu, cuda, or cuda:<index>.")
+    parser.add_argument("--profile-device", default="cpu", help="Device for optional model_profile_v74.py. Default cpu preserves edge/deployment latency meaning.")
     parser.add_argument("--data-dir", default=".", help="Input data directory.")
     parser.add_argument("--results-dir", default="results_v74", help="Training/results output directory.")
     parser.add_argument("--paper-dir", default="paper_v74", help="Paper tables/figures output directory.")
@@ -427,6 +432,8 @@ def main() -> int:
                     args.config_preset,
                     "--locked_split_manifest",
                     str(split_manifest_path),
+                    "--device",
+                    args.device,
                 ],
             ),
             args.dry_run,
@@ -660,7 +667,7 @@ def main() -> int:
                     "--model-confidence-threshold",
                     str(args.model_confidence_threshold),
                     "--device",
-                    "cpu",
+                    args.device,
                 ],
             ),
             args.dry_run,
@@ -689,7 +696,7 @@ def main() -> int:
                     "--permutation-repeats",
                     str(args.feature_importance_repeats),
                     "--device",
-                    "cpu",
+                    args.device,
                 ],
             ),
             args.dry_run,
@@ -706,7 +713,7 @@ def main() -> int:
             "--output-dir",
             str(Path(args.results_dir) / "model_profile"),
             "--device",
-            "cpu",
+            args.profile_device,
             "--batch-sizes",
             "1,32,512",
             "--warmup",
@@ -756,6 +763,8 @@ def main() -> int:
             str(args.model_confidence_threshold),
             "--heatmap-mode",
             args.heatmap_mode,
+            "--device",
+            args.device,
         ]
         if args.locked_allow_overwrite:
             locked_args.append("--allow-overwrite")

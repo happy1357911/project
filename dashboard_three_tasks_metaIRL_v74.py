@@ -17,6 +17,7 @@ from clinical_rules_v74 import (
     TASK3_NAME_MAP,
     TASK3_NP_EXTREME_VALUES,
     clean_value_zero as clean_value,
+    has_hard_rule_warning,
     infer_task2_hearing_type_from_rule,
     is_nr_value,
     mean_present,
@@ -39,7 +40,6 @@ SUPPORTED_CC = {(5, 0), (6, 0), (6, 1), (7, 0), (7, 5), (8, 0), (8, 6), (9, 0), 
 DEFAULT_CHECKPOINT = DEFAULT_PRIMARY_CHECKPOINT
 DEFAULT_RULE_CONFIDENCE_THRESHOLD = 0.8
 DEFAULT_MODEL_CONFIDENCE_THRESHOLD = 0.6
-
 ANALYSIS_TABLES = [
     ("Hybrid clinical value / no-support", Path("paper_v74/tables/main_hybrid_summary.csv")),
     ("Hybrid clinical value / locked-test", Path("paper_v74/tables/main_hybrid_summary_locked_test.csv")),
@@ -349,7 +349,14 @@ def predict_single(row_dict, task_name, side="right"):
         complete_for_rule = bool(warning.get("complete_for_rule", baseline_covered))
         rule_label_available = rule_label not in {None, "", INSUFFICIENT_EVIDENCE_LABEL}
         warning_reasons = str(warning.get("warning_reasons") or "").strip(";")
-        hybrid_uses_rule = rule_label_available and rule_confidence >= DEFAULT_RULE_CONFIDENCE_THRESHOLD
+        hard_warning = has_hard_rule_warning(warning_reasons)
+        hybrid_uses_rule = (
+            rule_label_available
+            and baseline_covered
+            and complete_for_rule
+            and rule_confidence >= DEFAULT_RULE_CONFIDENCE_THRESHOLD
+            and not hard_warning
+        )
         if hybrid_uses_rule:
             hybrid_decision = rule_label
             hybrid_source = "rule"
@@ -363,6 +370,12 @@ def predict_single(row_dict, task_name, side="right"):
             hybrid_source = "model"
             if not rule_label_available:
                 hybrid_decision_reason = "model_fallback_no_rule_prediction"
+            elif not baseline_covered:
+                hybrid_decision_reason = "model_fallback_rule_not_covered"
+            elif not complete_for_rule:
+                hybrid_decision_reason = "model_fallback_incomplete_rule_data"
+            elif hard_warning:
+                hybrid_decision_reason = "model_fallback_hard_rule_warning"
             elif rule_confidence < DEFAULT_RULE_CONFIDENCE_THRESHOLD:
                 hybrid_decision_reason = "model_fallback_low_rule_score"
             else:

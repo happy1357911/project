@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 
+from clinical_rules_v74 import has_hard_rule_warning
 from error_analysis_v74 import load_prediction_rows
 from preprocessing_v74 import INSUFFICIENT_EVIDENCE_LABEL
 
@@ -23,6 +24,7 @@ DERIVED_RULE_COLUMNS = [
     "rule_evidence_score",
     "score_deductions",
     "warning_reasons",
+    "hard_warning_flags",
 ]
 DERIVED_HYBRID_COLUMNS = [
     "hybrid_pred_label",
@@ -32,6 +34,7 @@ DERIVED_HYBRID_COLUMNS = [
     "hybrid_confidence_gate_used_rule",
     "hybrid_confidence_gate_used_model",
     "hybrid_low_confidence_abstain",
+    "hybrid_hard_warning_blocked_rule",
     "hybrid_model_confidence",
     "hybrid_decision_reason",
     "hybrid_warning_reasons",
@@ -142,11 +145,22 @@ def add_hybrid_predictions(
         & rule_label.str.lower().ne("none")
         & rule_label.ne(INSUFFICIENT_EVIDENCE_LABEL)
     )
-    use_rule = rule_label_available & out["rule_confidence"].ge(rule_confidence_threshold)
+    warning_text = out.get("warning_reasons", pd.Series("", index=out.index)).fillna("").astype(str).str.strip(";")
+    hard_warning = warning_text.map(has_hard_rule_warning)
+    baseline_covered = out.get("baseline_covered", pd.Series(False, index=out.index)).fillna(False).astype(bool)
+    complete_for_rule = out.get("complete_for_rule", baseline_covered).fillna(False).astype(bool)
+    use_rule = (
+        rule_label_available
+        & baseline_covered
+        & complete_for_rule
+        & out["rule_confidence"].ge(rule_confidence_threshold)
+        & (~hard_warning)
+    )
     out["hybrid_pred_label"] = out["pred_label"]
     out.loc[use_rule, "hybrid_pred_label"] = out.loc[use_rule, "rule_decision_label"]
     out["hybrid_used_rule"] = use_rule
     out["hybrid_used_model"] = ~use_rule
+    out["hybrid_hard_warning_blocked_rule"] = rule_label_available & hard_warning & (~use_rule)
 
     confidence = get_model_confidence(out)
     threshold = max(0.0, min(1.0, float(model_confidence_threshold or 0.0)))
@@ -158,9 +172,11 @@ def add_hybrid_predictions(
     out["hybrid_confidence_gate_used_model"] = (~use_rule) & (~low_confidence)
     out["hybrid_model_confidence"] = confidence.astype(float)
 
-    warning_text = out.get("warning_reasons", pd.Series("", index=out.index)).fillna("").astype(str).str.strip(";")
     reason = pd.Series("model_fallback_low_rule_score", index=out.index, dtype=object)
     reason = reason.mask(~rule_label_available, "model_fallback_no_rule_prediction")
+    reason = reason.mask(rule_label_available & (~baseline_covered), "model_fallback_rule_not_covered")
+    reason = reason.mask(rule_label_available & baseline_covered & (~complete_for_rule), "model_fallback_incomplete_rule_data")
+    reason = reason.mask(out["hybrid_hard_warning_blocked_rule"], "model_fallback_hard_rule_warning")
     reason = reason.mask(use_rule & warning_text.ne(""), "rule_score_ge_threshold_with_warning")
     reason = reason.mask(use_rule & warning_text.eq(""), "rule_score_ge_threshold")
     reason = reason.mask(low_confidence, "abstain_low_model_confidence")

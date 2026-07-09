@@ -11,6 +11,7 @@ import pandas as pd
 from sklearn.utils.class_weight import compute_sample_weight
 
 from checkpoint_utils_v74 import DEFAULT_PRIMARY_CHECKPOINT, resolve_checkpoint_paths
+from clinical_rules_v74 import has_hard_rule_warning
 
 try:
     import torch
@@ -21,6 +22,26 @@ except ModuleNotFoundError:
 
 
 DEFAULT_CHECKPOINT = DEFAULT_PRIMARY_CHECKPOINT
+
+def resolve_torch_device(device_choice: str = "cpu"):
+    choice = str(device_choice or "cpu").strip().lower()
+    if torch is None:
+        if choice.startswith("cuda"):
+            raise ModuleNotFoundError("torch is required for CUDA model profiling")
+        raise ModuleNotFoundError("torch is required for neural checkpoint profiling")
+    if choice in {"", "auto"}:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        print("[model_profile_v74] CUDA is unavailable; using CPU.")
+        return torch.device("cpu")
+    if choice == "cpu":
+        return torch.device("cpu")
+    if choice.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"--device {device_choice} was requested, but CUDA is not available.")
+        return torch.device(choice)
+    raise ValueError(f"Unsupported --device value: {device_choice}. Use auto, cpu, cuda, or cuda:<index>.")
+
 
 
 def load_model(checkpoint_path: str, device: torch.device):
@@ -132,7 +153,9 @@ def profile_checkpoint(checkpoint_path: Path, args, model_name: str = None):
             **identity,
             "skip_reason": "torch_not_installed",
         }]), {}
-    device = torch.device(args.device)
+    device = resolve_torch_device(args.device)
+    setattr(args, "resolved_device", str(device))
+    print(f"[model_profile_v74] Requested device={args.device}; resolved neural device={device}")
     model, meta = load_model(str(checkpoint), device)
     param = parameter_summary(model)
     input_dim = len(meta["union_features"])
@@ -178,6 +201,7 @@ def profile_hybrid_predictions(path: Path, args) -> pd.DataFrame:
         "baseline_covered",
         "complete_for_rule",
         "rule_confidence",
+        "warning_reasons",
         "pred_label",
         "forced_pred_label",
     })
@@ -193,6 +217,10 @@ def profile_hybrid_predictions(path: Path, args) -> pd.DataFrame:
     covered = covered.to_numpy()
     complete = complete.astype(bool).to_numpy()
     rule_conf = pd.to_numeric(df["rule_confidence"], errors="coerce").fillna(0.0).to_numpy()
+    if "warning_reasons" in df.columns:
+        hard_warning = df["warning_reasons"].fillna("").astype(str).map(has_hard_rule_warning).to_numpy(dtype=bool)
+    else:
+        hard_warning = np.zeros(len(df), dtype=bool)
     model_pred = df["pred_label"].astype(str).to_numpy()
     rule_pred_series = df["forced_pred_label"].fillna("").astype(str).str.strip()
     rule_label_available = (
@@ -206,11 +234,23 @@ def profile_hybrid_predictions(path: Path, args) -> pd.DataFrame:
         idx = np.array(list(sub_idx), dtype=int)
         elapsed = []
         for _ in range(args.warmup):
-            use_rule = rule_label_available[idx] & (rule_conf[idx] >= args.rule_confidence_threshold)
+            use_rule = (
+                rule_label_available[idx]
+                & covered[idx]
+                & complete[idx]
+                & (rule_conf[idx] >= args.rule_confidence_threshold)
+                & (~hard_warning[idx])
+            )
             np.where(use_rule, rule_pred[idx], model_pred[idx])
         for _ in range(args.repeats):
             start = time.perf_counter()
-            use_rule = rule_label_available[idx] & (rule_conf[idx] >= args.rule_confidence_threshold)
+            use_rule = (
+                rule_label_available[idx]
+                & covered[idx]
+                & complete[idx]
+                & (rule_conf[idx] >= args.rule_confidence_threshold)
+                & (~hard_warning[idx])
+            )
             np.where(use_rule, rule_pred[idx], model_pred[idx])
             elapsed.append(time.perf_counter() - start)
         mean_ms = 1000.0 * sum(elapsed) / max(len(elapsed), 1)
@@ -230,6 +270,8 @@ def profile_hybrid_predictions(path: Path, args) -> pd.DataFrame:
             "warmup": int(args.warmup),
             "repeats": int(args.repeats),
             "rule_confidence_threshold": float(args.rule_confidence_threshold),
+            "hybrid_rule_rate": float(np.mean(use_rule)) if len(use_rule) else 0.0,
+            "hard_warning_block_rate": float(np.mean(rule_label_available[idx] & hard_warning[idx])) if len(idx) else 0.0,
         })
     return pd.DataFrame(rows)
 
@@ -466,7 +508,7 @@ def main():
     parser.add_argument("--checkpoint-glob", default="", help="Optional glob for profiling multiple checkpoints.")
     parser.add_argument("--profile-all-default", action="store_true", help="Profile all results_v74/five_runs/**/best_model.pth checkpoints.")
     parser.add_argument("--output-dir", default="results_v74/model_profile")
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="cpu", help="Neural checkpoint profiling device: cpu, auto, cuda, or cuda:<index>. Default cpu preserves edge/deployment latency meaning.")
     parser.add_argument("--batch-sizes", default="1,32,512")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=20)
@@ -518,6 +560,8 @@ def main():
     manifest = {
         "checkpoints": [str(path) for path in collect_checkpoint_paths(args)],
         "device": args.device,
+        "requested_device": args.device,
+        "resolved_device": getattr(args, "resolved_device", args.device),
         "batch_sizes": args.batch_sizes,
         "warmup": args.warmup,
         "repeats": args.repeats,

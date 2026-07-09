@@ -112,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-preset", default="all", choices=["recommended", "ablation", "all"])
     parser.add_argument("--experiments", default="full,no_meta,no_irl,single_task")
     parser.add_argument("--single-task-target", default="all", choices=["Task1", "Task2", "Task3", "all"])
+    parser.add_argument("--device", default="auto", help="Device passed to train_v74.py: auto, cpu, cuda, or cuda:<index>.")
     parser.add_argument("--rule-confidence-threshold", type=float, default=0.8)
     parser.add_argument("--model-confidence-threshold", type=float, default=0.6)
     parser.add_argument("--heatmap-mode", default="seed0", choices=["none", "seed0", "all"])
@@ -191,6 +192,8 @@ def main() -> None:
                 args.single_task_target,
                 "--locked_split_manifest",
                 str(split_manifest),
+                "--device",
+                args.device,
             ],
             root,
             args.dry_run,

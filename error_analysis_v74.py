@@ -738,6 +738,74 @@ def build_task2_confusion_focus(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def build_task2_rule_label_conflict_audit(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "task" not in df.columns:
+        return pd.DataFrame()
+    task2 = df[df["task"] == "Task2"].copy()
+    if task2.empty:
+        return pd.DataFrame()
+
+    true_label = task2.get("true_label", pd.Series("", index=task2.index)).fillna("").astype(str)
+    model_label = task2.get("pred_label", pd.Series("", index=task2.index)).fillna("").astype(str)
+    rule_label = task2.get("rule_decision_label", task2.get("forced_pred_label", pd.Series(INSUFFICIENT_EVIDENCE_LABEL, index=task2.index))).fillna(INSUFFICIENT_EVIDENCE_LABEL).astype(str)
+    forced_label = task2.get("forced_pred_label", rule_label).fillna(INSUFFICIENT_EVIDENCE_LABEL).astype(str)
+    warning_text = task2.get("warning_reasons", pd.Series("", index=task2.index)).fillna("").astype(str)
+    baseline_covered = task2.get("baseline_covered", pd.Series(False, index=task2.index)).fillna(False).astype(bool)
+    complete_for_rule = task2.get("complete_for_rule", baseline_covered).fillna(False).astype(bool)
+
+    task2["rule_label_matches_true"] = rule_label.eq(true_label)
+    task2["forced_label_matches_true"] = forced_label.eq(true_label)
+    task2["model_label_matches_true"] = model_label.eq(true_label)
+    task2["rule_model_agree"] = rule_label.eq(model_label)
+    task2["rule_blocked_or_abstained"] = ~baseline_covered
+    task2["rule_incomplete_or_low_confidence"] = (~complete_for_rule) | task2.get("rule_confidence", pd.Series(0.0, index=task2.index)).fillna(0.0).astype(float).lt(0.8)
+    task2["has_negative_abg_warning"] = warning_text.str.contains("negative_abg_or_measurement_inconsistency", regex=False)
+    task2["has_abg_borderline_warning"] = warning_text.str.contains("abg_borderline", regex=False)
+    task2["has_class_gate_warning"] = warning_text.str.contains("task2_class_rule_precision_gate", regex=False)
+    task2["has_missing_evidence_warning"] = warning_text.str.contains("missing", regex=False) | warning_text.str.contains("no_bc_data", regex=False)
+
+    conditions = [
+        task2["has_negative_abg_warning"],
+        task2["has_abg_borderline_warning"],
+        task2["has_class_gate_warning"],
+        task2["has_missing_evidence_warning"],
+        true_label.eq("SNHL") & forced_label.eq("MHL"),
+        true_label.eq("MHL") & forced_label.eq("SNHL"),
+        true_label.eq("CHL") & forced_label.ne("CHL"),
+        task2["rule_label_matches_true"],
+    ]
+    choices = [
+        "negative_abg_measurement_inconsistency",
+        "abg_borderline_fallback",
+        "class_precision_gate_blocked_rule",
+        "missing_or_incomplete_evidence",
+        "snhl_to_mhl_forced_rule_conflict",
+        "mhl_to_snhl_forced_rule_conflict",
+        "chl_forced_rule_conflict",
+        "rule_matches_true",
+    ]
+    task2["task2_rule_label_conflict_type"] = np.select(conditions, choices, default="other_rule_label_conflict")
+
+    preferred_cols = [
+        "config_name", "exp_name", "seed", "prediction_file", "evaluation_mode",
+        "case_id", "ear_side", "label_col", "true_label", "pred_label",
+        "forced_pred_label", "rule_decision_label", "abstain_pred_label",
+        "baseline_covered", "complete_for_rule", "rule_confidence", "rule_evidence_score",
+        "score_deductions", "warning_reasons", "compatible_labels",
+        "rule_label_matches_true", "forced_label_matches_true", "model_label_matches_true", "rule_model_agree",
+        "rule_blocked_or_abstained", "rule_incomplete_or_low_confidence",
+        "has_negative_abg_warning", "has_abg_borderline_warning", "has_class_gate_warning", "has_missing_evidence_warning",
+        "task2_rule_label_conflict_type",
+        "task2_has_bc_missing", "task2_has_ac_nr", "task2_has_bc_nr", "task2_has_any_nr",
+        "task2_has_abg_censored", "task2_has_abg_borderline", "task2_has_missing_or_censored",
+        "confidence", "correct",
+    ]
+    existing = [col for col in preferred_cols if col in task2.columns]
+    return task2[existing].sort_values(
+        [col for col in ["evaluation_mode", "config_name", "exp_name", "seed", "task2_rule_label_conflict_type", "case_id", "ear_side"] if col in existing]
+    ).reset_index(drop=True)
+
+
 def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]:
     output_dir.mkdir(parents=True, exist_ok=True)
     files = {
@@ -752,6 +820,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
         "three_way_conflict_summary": output_dir / "three_way_conflict_summary.csv",
         "task2_clinical_subgroups": output_dir / "task2_clinical_subgroups.csv",
         "task2_confusion_focus": output_dir / "task2_confusion_focus.csv",
+        "task2_rule_label_conflict_audit": output_dir / "task2_rule_label_conflict_audit.csv",
         "decision_safety_summary": output_dir / "decision_safety_summary.csv",
         "clinical_error_taxonomy_summary": output_dir / "clinical_error_taxonomy_summary.csv",
         "manifest": output_dir / "error_analysis_manifest.json",
@@ -777,6 +846,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
     rule_true_model_conflict_summary_df = build_rule_true_model_conflict_summary(df)
     task2_clinical_df = build_task2_clinical_subgroups(df)
     task2_confusion_df = build_task2_confusion_focus(df)
+    task2_rule_label_conflict_audit_df = build_task2_rule_label_conflict_audit(df)
     decision_safety_df = build_decision_safety_summary(df)
     clinical_error_taxonomy_df = build_clinical_error_taxonomy(df)
     error_df = df.loc[~df["correct"]].copy()
@@ -793,6 +863,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
     rule_true_model_conflict_summary_df.to_csv(files["three_way_conflict_summary"], index=False, encoding="utf-8-sig")
     task2_clinical_df.to_csv(files["task2_clinical_subgroups"], index=False, encoding="utf-8-sig")
     task2_confusion_df.to_csv(files["task2_confusion_focus"], index=False, encoding="utf-8-sig")
+    task2_rule_label_conflict_audit_df.to_csv(files["task2_rule_label_conflict_audit"], index=False, encoding="utf-8-sig")
     decision_safety_df.to_csv(files["decision_safety_summary"], index=False, encoding="utf-8-sig")
     clinical_error_taxonomy_df.to_csv(files["clinical_error_taxonomy_summary"], index=False, encoding="utf-8-sig")
 
@@ -809,6 +880,7 @@ def save_error_analysis(df: pd.DataFrame, output_dir: Path) -> Dict[str, object]
         "n_three_way_conflict_summary_rows": int(len(rule_true_model_conflict_summary_df)),
         "n_task2_clinical_subgroup_rows": int(len(task2_clinical_df)),
         "n_task2_confusion_focus_rows": int(len(task2_confusion_df)),
+        "n_task2_rule_label_conflict_audit_rows": int(len(task2_rule_label_conflict_audit_df)),
         "n_decision_safety_summary_rows": int(len(decision_safety_df)),
         "n_clinical_error_taxonomy_summary_rows": int(len(clinical_error_taxonomy_df)),
         "files": {key: str(path) for key, path in files.items()},
